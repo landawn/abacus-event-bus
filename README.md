@@ -35,20 +35,12 @@ The library builds on [abacus-common](https://github.com/landawn/abacus-common) 
     <artifactId>abacus-event-bus</artifactId>
     <version>1.0</version>
 </dependency>
-
-<!-- Required at runtime; abacus-event-bus does not pull it in transitively -->
-<dependency>
-    <groupId>com.landawn.abacus</groupId>
-    <artifactId>abacus-common</artifactId>
-    <version>8.0.1</version>
-</dependency>
 ```
 
 **Gradle**
 
 ```gradle
 implementation 'com.landawn.abacus:abacus-event-bus:1.0'
-implementation 'com.landawn.abacus:abacus-common:8.0.1'
 ```
 
 ## Quick start
@@ -173,23 +165,6 @@ exceptions are caught and logged so other subscribers can still receive the even
 may overlap when posts arrive concurrently or an executor runs multiple tasks, so shared subscriber
 state must support the concurrency your application uses. Unregister listeners when they are no longer needed.
 
-## Build and test
-
-Build from this directory with Maven and JDK 21 or newer:
-
-```sh
-mvn clean package
-```
-
-Run unit tests or perform local verification without release signing:
-
-```sh
-mvn test
-mvn verify -Dgpg.skip=true
-```
-
-See the [unit test guide](src/test/README.md) for test organization and focused suite execution.
-
 ## Documentation
 
 * [API Javadoc](https://www.javadoc.io/doc/com.landawn.abacus/abacus-event-bus/1.0/index.html)
@@ -199,7 +174,6 @@ See the [unit test guide](src/test/README.md) for test organization and focused 
 ## Related projects
 
 * [abacus-common](https://github.com/landawn/abacus-common): the core utility library and runtime dependency.
-* [abacus-extra](https://github.com/landawn/abacus-extra): additional tuples, point/value types, and array utilities.
 
 ## License
 
