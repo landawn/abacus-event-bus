@@ -5,7 +5,7 @@
 
 	<groupId>com.landawn.abacus</groupId>
 	<artifactId>abacus-event-bus</artifactId>
-	<version>1.0</version>
+	<version>1.1</version>
 	<packaging>jar</packaging>
 	<name>abacus-event-bus</name>
 	<description>Lightweight synchronous and asynchronous publish-subscribe event bus</description>
