@@ -19,16 +19,8 @@ import com.landawn.abacus.util.ThreadMode;
 @Tag("unit")
 public class EventBusSubIdentifierTest extends TestBase {
 
-    public static class Handler {
-        public void on(String event) {
-        }
-
-        public void other(String event) {
-        }
-    }
-
     @Test
-    public void testSubIdentifierEqualsAndHashCode() throws Exception {
+    void identifier_whenMetadataDiffers_preservesEqualityAndHashCodeContracts() throws Exception {
         Handler handler = new Handler();
         Method on = Handler.class.getMethod("on", String.class);
         Method other = Handler.class.getMethod("other", String.class);
@@ -56,11 +48,16 @@ public class EventBusSubIdentifierTest extends TestBase {
         assertNotEquals(bound, boundOtherInstance);
         assertNotEquals(bound, boundOtherMode);
         assertTrue(bound.toString().contains("on"));
+
+        Method genericOn = Subscriber.class.getMethod("on", Object.class);
+        EventBus.SubIdentifier strings = new EventBus.SubIdentifier(genericOn, String.class);
+        EventBus.SubIdentifier numbers = new EventBus.SubIdentifier(genericOn, Number.class);
+        assertNotEquals(strings, numbers, "Resolved generic event types are part of subscriber identity");
     }
 
     @ParameterizedTest
     @ValueSource(longs = { 0, -1_000_000_000L, 1_000_000_000L, Long.MAX_VALUE - 1, Long.MIN_VALUE + 1 })
-    public void testEventIntervalUsesMonotonicElapsedTimeAndHonorsBoundary(long firstPostTime) throws NoSuchMethodException {
+    void interval_whenMonotonicTimestampReachesBoundary_acceptsNextEvent(long firstPostTime) throws NoSuchMethodException {
         class SubscriberWithInterval {
             @Subscribe(intervalMillis = 100)
             public void onEvent(String event) {
@@ -80,5 +77,13 @@ public class EventBusSubIdentifierTest extends TestBase {
         assertTrue(sub.isWithinPostInterval(firstPostTime + intervalNanos - 1));
         assertFalse(sub.isWithinPostInterval(firstPostTime + intervalNanos));
         assertFalse(sub.isWithinPostInterval(firstPostTime - 1));
+    }
+
+    public static class Handler {
+        public void on(String event) {
+        }
+
+        public void other(String event) {
+        }
     }
 }

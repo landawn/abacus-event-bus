@@ -1,36 +1,35 @@
 package com.landawn.abacus;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Iterator;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.Test;
 
-import com.landawn.abacus.type.Type;
-import com.landawn.abacus.util.BiIterator;
-import com.landawn.abacus.util.Iterators;
 import com.landawn.abacus.util.N;
-import com.landawn.abacus.util.Pair;
-import com.landawn.abacus.util.TriIterator;
-import com.landawn.abacus.util.Triple;
-import com.landawn.abacus.util.TypeReference;
 
 @Tag("base-test")
 public abstract class TestBase {
 
-    public static final char[] NULL_CHAR_ARRAY = "null".toCharArray();
+    /** Runs the same operation simultaneously on the requested number of workers. */
+    protected static void runConcurrently(int threadCount, Runnable action) throws InterruptedException {
+        runConcurrently(Collections.nCopies(threadCount, action).toArray(Runnable[]::new));
+    }
 
     /** Runs a simultaneous batch and reports worker failures on the JUnit thread. */
-    protected static void runConcurrently(int threadCount, Runnable action) throws InterruptedException {
+    protected static void runConcurrently(Runnable... actions) throws InterruptedException {
+        int threadCount = actions.length;
         CountDownLatch ready = new CountDownLatch(threadCount);
         CountDownLatch start = new CountDownLatch(1);
         CountDownLatch done = new CountDownLatch(threadCount);
@@ -38,6 +37,7 @@ public abstract class TestBase {
         List<Thread> workers = new ArrayList<>();
         try {
             for (int i = 0; i < threadCount; i++) {
+                Runnable action = actions[i];
                 Thread worker = new Thread(() -> {
                     ready.countDown();
                     try {
@@ -83,104 +83,13 @@ public abstract class TestBase {
         assertNull(reference.get(), "Discarded object is still strongly retained");
     }
 
-    public static void assertHaveSameElements(boolean[] expected, boolean[] actual) {
-        assertTrue(N.containsSameElements(expected, actual), "Expected: " + N.toString(expected) + ", Actual: " + N.toString(actual));
-    }
-
-    public static void assertHaveSameElements(char[] expected, char[] actual) {
-        assertTrue(N.containsSameElements(expected, actual), "Expected: " + N.toString(expected) + ", Actual: " + N.toString(actual));
-    }
-
-    public static void assertHaveSameElements(byte[] expected, byte[] actual) {
-        assertTrue(N.containsSameElements(expected, actual), "Expected: " + N.toString(expected) + ", Actual: " + N.toString(actual));
-    }
-
-    public static void assertHaveSameElements(short[] expected, short[] actual) {
-        assertTrue(N.containsSameElements(expected, actual), "Expected: " + N.toString(expected) + ", Actual: " + N.toString(actual));
-    }
-
-    public static void assertHaveSameElements(int[] expected, int[] actual) {
-        assertTrue(N.containsSameElements(expected, actual), "Expected: " + N.toString(expected) + ", Actual: " + N.toString(actual));
-    }
-
-    public static void assertHaveSameElements(long[] expected, long[] actual) {
-        assertTrue(N.containsSameElements(expected, actual), "Expected: " + N.toString(expected) + ", Actual: " + N.toString(actual));
-    }
-
-    public static void assertHaveSameElements(float[] expected, float[] actual) {
-        assertTrue(N.containsSameElements(expected, actual), "Expected: " + N.toString(expected) + ", Actual: " + N.toString(actual));
-    }
-
-    public static void assertHaveSameElements(double[] expected, double[] actual) {
-        assertTrue(N.containsSameElements(expected, actual), "Expected: " + N.toString(expected) + ", Actual: " + N.toString(actual));
-    }
-
-    public static <T> void assertHaveSameElements(T[] expected, T[] actual) {
-        assertTrue(N.containsSameElements(expected, actual), "Expected: " + N.toString(expected) + ", Actual: " + N.toString(actual));
-    }
-
-    public static <T> void assertHaveSameElements(Collection<? extends T> expected, T[] actual) {
-        assertHaveSameElements(expected, N.toList(actual));
-    }
-
     public static <T> void assertHaveSameElements(Collection<? extends T> expected, Collection<? extends T> actual) {
         assertTrue(N.containsSameElements(expected, actual), "Expected: " + N.toString(expected) + ", Actual: " + N.toString(actual));
     }
 
-    public static <T> Iterable<T> createIterable(final T... a) {
-        return new Iterable<>() {
-            @Override
-            public java.util.Iterator<T> iterator() {
-                return N.toList(a).iterator();
-            }
-        };
+    /** Shut down test-owned workers and verify that none remain after the test. */
+    protected static void shutdownAndAwaitTermination(ExecutorService executor) throws InterruptedException {
+        executor.shutdownNow();
+        assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS), "Test executor did not terminate");
     }
-
-    public static <T> Iterable<T> createIterable(final Collection<? extends T> c) {
-        return new Iterable<>() {
-            @Override
-            public java.util.Iterator<T> iterator() {
-                return (Iterator<T>) c.iterator();
-            }
-        };
-    }
-
-    public static <A, B> BiIterator<A, B> createBiIterator(final Iterable<Pair<A, B>> iterable) {
-        if (iterable == null) {
-            return BiIterator.empty();
-        }
-
-        final Iterator<Pair<A, B>> iter = iterable.iterator();
-
-        return BiIterator.of(Iterators.map(iter, e -> N.newEntry(e.left(), e.right())));
-    }
-
-    public static <A, B, C> TriIterator<A, B, C> createTriIterator(final Iterable<Triple<A, B, C>> iterable) {
-        if (iterable == null) {
-            return TriIterator.empty();
-        }
-
-        final Iterator<Triple<A, B, C>> iter = iterable.iterator();
-
-        return TriIterator.generate(() -> iter.hasNext(), t -> {
-            final Triple<A, B, C> e = iter.next();
-            t.setLeft(e.left());
-            t.setMiddle(e.middle());
-            t.setRight(e.right());
-        });
-    }
-
-    protected static <T> Type<T> createType(Class<T> typeClass) {
-        return Type.of(typeClass);
-    }
-
-    protected static <T> Type<T> createType(TypeReference<T> typeRef) {
-        return typeRef.type();
-    }
-
-    @SuppressWarnings("rawtypes")
-    protected static <T extends Type> T createType(String typeName) {
-        return (T) Type.of(typeName);
-    }
-
 }

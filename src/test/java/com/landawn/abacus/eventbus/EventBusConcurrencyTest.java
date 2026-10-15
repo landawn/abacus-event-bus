@@ -18,6 +18,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.config.LoggerConfig;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -31,6 +35,180 @@ import com.landawn.abacus.TestBase;
 @Timeout(30)
 @ResourceLock("eventbus-logger")
 public class EventBusConcurrencyTest extends TestBase {
+
+    @Test
+    void unregister_whenRegistrationIsUpdatingIndexes_waitsForAtomicRemoval() throws Exception {
+        final EventBus eventBus = EventBus.create();
+        final RegistrationSubscriber subscriber = new RegistrationSubscriber();
+        final java.lang.reflect.Field indexField = EventBus.class.getDeclaredField("registeredEventIdSubMap");
+        indexField.setAccessible(true);
+        final Object eventIdIndex = indexField.get(eventBus);
+        final AtomicReference<Throwable> failure = new AtomicReference<>();
+        final Thread registering = new Thread(() -> {
+            try {
+                eventBus.register(subscriber, "concurrent");
+            } catch (Throwable e) {
+                failure.compareAndSet(null, e);
+            }
+        });
+        final Thread unregistering = new Thread(() -> {
+            try {
+                eventBus.unregister(subscriber);
+            } catch (Throwable e) {
+                failure.compareAndSet(null, e);
+            }
+        });
+
+        registering.setDaemon(true);
+        unregistering.setDaemon(true);
+        try {
+            synchronized (eventIdIndex) {
+                // Pause registration after its main-registry update, before its event-ID update.
+                registering.start();
+                awaitBlockedThread(registering);
+                assertEquals(List.of(subscriber), eventBus.allSubscribers());
+
+                unregistering.start();
+                awaitBlockedThread(unregistering);
+                // Removal must wait for the pending registration transaction, otherwise its
+                // later event-ID insertion can leave an unlisted subscriber receiving events.
+                assertEquals(List.of(subscriber), eventBus.allSubscribers());
+            }
+        } finally {
+            registering.join(5000);
+            unregistering.join(5000);
+        }
+
+        assertFalse(registering.isAlive());
+        assertFalse(unregistering.isAlive());
+        assertNull(failure.get());
+        assertTrue(eventBus.allSubscribers().isEmpty());
+        eventBus.post("concurrent", "after removal");
+        assertNull(subscriber.lastEvent);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = { false, true })
+    void post_whenCallbacksCrossPostSuppressedEvents_completesWithoutDeadlock(boolean throttle) throws Exception {
+        EventBus bus = EventBus.create();
+        CrossPosting handler = throttle ? new ThrottledCrossPosting(bus) : new DeduplicatedCrossPosting(bus);
+        bus.register(handler);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread first = start(() -> bus.post(handler.a), failure);
+        Thread second = start(() -> bus.post(handler.b), failure);
+        finished(List.of(first, second), failure);
+        assertEquals(2, handler.calls.get());
+        assertFalse(handler.coordinationFailed.get(), "Both handlers must enter concurrently");
+    }
+
+    @Test
+    void post_whenEqualityCallbacksCrossPost_releasesHandlerMonitors() throws Exception {
+        EventBus bus = EventBus.create();
+        EqualityHandlers handler = new EqualityHandlers();
+        bus.register(handler);
+        EA a = new EA("");
+        EB b = new EB("\u4e8b\u4ef6\ud83d\ude80");
+        bus.post(a).post(b);
+        CountDownLatch comparing = new CountDownLatch(2);
+        CountDownLatch posted = new CountDownLatch(2);
+        a.onCompare = () -> compareAndPost(comparing, posted, bus, b);
+        b.onCompare = () -> compareAndPost(comparing, posted, bus, a);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread first = start(() -> bus.post(new EA("next")), failure);
+        Thread second = start(() -> bus.post(new EB("next")), failure);
+        finished(List.of(first, second), failure);
+        assertEquals(4, handler.calls.get());
+    }
+
+    @Test
+    void post_whenEqualityReenters_revalidatesLatestReservation() {
+        EventBus bus = EventBus.create();
+        EqualityCollector handler = new EqualityCollector();
+        bus.register(handler);
+        EqualityEvent first = new EqualityEvent("");
+        EqualityEvent next = new EqualityEvent("\u4e8b\u4ef6\ud83d\ude80");
+        bus.post(first);
+        first.onCompare = () -> bus.post(next);
+        bus.post(next);
+        assertEquals(List.of(first, next), handler.events);
+    }
+
+    @Test
+    void post_whenEqualEventsRace_reservesDeliveryOnce() throws InterruptedException {
+        EventBus bus = EventBus.create();
+        StringCollector handler = new StringCollector();
+        bus.register(handler);
+        // Distinct instances ensure deduplication uses equality, not identity.
+        runConcurrently(12, () -> bus.post(new String("\u4e8b\u4ef6\ud83d\ude80")));
+
+        assertEquals(List.of("\u4e8b\u4ef6\ud83d\ude80"), handler.events);
+        assertThrows(IllegalArgumentException.class, () -> bus.post((Object) null));
+        bus.post("").post("");
+        assertEquals(List.of("\u4e8b\u4ef6\ud83d\ude80", ""), handler.events);
+    }
+
+    @Test
+    void post_whenCallbackReentersAndFails_preservesReservedState() {
+        EventBus bus = EventBus.create();
+        ReentrantHandler handler = new ReentrantHandler(bus);
+        bus.register(handler);
+        assertDoesNotThrow(() -> bus.post(""));
+        assertEquals(2, handler.calls.get());
+        bus.post("\ud83d\ude80");
+        assertEquals(2, handler.calls.get());
+    }
+
+    @Test
+    void post_whenCallbacksInspectLockState_runsOutsideHandlerMonitor() throws Exception {
+        EventBus bus = EventBus.create();
+        DebugHandler handler = new DebugHandler();
+        bus.register(handler);
+        var field = EventBus.class.getDeclaredField("registeredSubMap");
+        field.setAccessible(true);
+        handler.monitor = ((List<?>) ((Map<?, ?>) field.get(bus)).get(handler)).get(0);
+        String name = EventBus.class.getName();
+        var context = (org.apache.logging.log4j.core.LoggerContext) org.apache.logging.log4j.LogManager.getContext(false);
+        var config = context.getConfiguration();
+        var old = config.getLoggers().get(name);
+        config.removeLogger(name);
+        config.addLogger(name, new org.apache.logging.log4j.core.config.LoggerConfig(name, org.apache.logging.log4j.Level.DEBUG, false));
+        context.updateLoggers();
+        try {
+            AtomicInteger strings = new AtomicInteger();
+            AtomicInteger comparisons = new AtomicInteger();
+            bus.post(new DebugEvent(bus, handler.monitor, handler.violation, strings, comparisons));
+            bus.post(new DebugEvent(bus, handler.monitor, handler.violation, strings, comparisons));
+            assertTrue(strings.get() > 0, "Debug formatting must be exercised");
+            assertTrue(comparisons.get() > 0);
+            assertFalse(handler.violation.get(), "Application callbacks must not hold the filtering monitor");
+            assertEquals(2, handler.calls, "Formatting reentry must see the event already reserved");
+        } finally {
+            config.removeLogger(name);
+            if (old != null) {
+                config.addLogger(name, old);
+            }
+            context.updateLoggers();
+        }
+    }
+
+    @Test
+    void postSticky_whenRegistrationRaces_deliversRetainedEventExactlyOnce() throws InterruptedException {
+        for (int attempt = 0; attempt < 30; attempt++) {
+            EventBus bus = EventBus.create();
+            List<String> received = Collections.synchronizedList(new ArrayList<>());
+            Object subscriber = new Object() {
+                @Subscribe(sticky = true)
+                public void onEvent(String event) {
+                    received.add(event);
+                }
+            };
+
+            runConcurrently(() -> bus.register(subscriber, "race"), () -> bus.postSticky("race", "retained"));
+
+            assertEquals(List.of("retained"), received, "Sticky registration race " + attempt);
+        }
+    }
+
     public static class A {
     }
 
@@ -120,20 +298,6 @@ public class EventBusConcurrencyTest extends TestBase {
         }
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = { false, true })
-    public void crossPostingSuppressedEventsDoesNotDeadlock(boolean throttle) throws Exception {
-        EventBus bus = EventBus.create();
-        CrossPosting handler = throttle ? new ThrottledCrossPosting(bus) : new DeduplicatedCrossPosting(bus);
-        bus.register(handler);
-        AtomicReference<Throwable> failure = new AtomicReference<>();
-        Thread first = start(() -> bus.post(handler.a), failure);
-        Thread second = start(() -> bus.post(handler.b), failure);
-        finished(List.of(first, second), failure);
-        assertEquals(2, handler.calls.get());
-        assertFalse(handler.coordinationFailed.get(), "Both handlers must enter concurrently");
-    }
-
     public static class EqualityEvent {
         final String value;
         Runnable onCompare;
@@ -189,25 +353,6 @@ public class EventBusConcurrencyTest extends TestBase {
         }
     }
 
-    @Test
-    public void equalityCallbacksCanCrossPostWithoutHoldingHandlerMonitors() throws Exception {
-        EventBus bus = EventBus.create();
-        EqualityHandlers handler = new EqualityHandlers();
-        bus.register(handler);
-        EA a = new EA("");
-        EB b = new EB("\u4e8b\u4ef6\ud83d\ude80");
-        bus.post(a).post(b);
-        CountDownLatch comparing = new CountDownLatch(2);
-        CountDownLatch posted = new CountDownLatch(2);
-        a.onCompare = () -> compareAndPost(comparing, posted, bus, b);
-        b.onCompare = () -> compareAndPost(comparing, posted, bus, a);
-        AtomicReference<Throwable> failure = new AtomicReference<>();
-        Thread first = start(() -> bus.post(new EA("next")), failure);
-        Thread second = start(() -> bus.post(new EB("next")), failure);
-        finished(List.of(first, second), failure);
-        assertEquals(4, handler.calls.get());
-    }
-
     private static void compareAndPost(CountDownLatch comparing, CountDownLatch posted, EventBus bus, Object event) {
         comparing.countDown();
         try {
@@ -235,19 +380,6 @@ public class EventBusConcurrencyTest extends TestBase {
         }
     }
 
-    @Test
-    public void reentrantEqualityRevalidatesTheLatestReservation() {
-        EventBus bus = EventBus.create();
-        EqualityCollector handler = new EqualityCollector();
-        bus.register(handler);
-        EqualityEvent first = new EqualityEvent("");
-        EqualityEvent next = new EqualityEvent("\u4e8b\u4ef6\ud83d\ude80");
-        bus.post(first);
-        first.onCompare = () -> bus.post(next);
-        bus.post(next);
-        assertEquals(List.of(first, next), handler.events);
-    }
-
     public static class StringCollector {
         final List<String> events = Collections.synchronizedList(new ArrayList<>());
 
@@ -255,20 +387,6 @@ public class EventBusConcurrencyTest extends TestBase {
         public void on(String event) {
             events.add(event);
         }
-    }
-
-    @Test
-    public void concurrentEqualEventsAreReservedOnce() throws InterruptedException {
-        EventBus bus = EventBus.create();
-        StringCollector handler = new StringCollector();
-        bus.register(handler);
-        // Distinct instances ensure deduplication uses equality, not identity.
-        runConcurrently(12, () -> bus.post(new String("\u4e8b\u4ef6\ud83d\ude80")));
-
-        assertEquals(List.of("\u4e8b\u4ef6\ud83d\ude80"), handler.events);
-        assertThrows(IllegalArgumentException.class, () -> bus.post((Object) null));
-        bus.post("").post("");
-        assertEquals(List.of("\u4e8b\u4ef6\ud83d\ude80", ""), handler.events);
     }
 
     public static class ReentrantHandler {
@@ -289,17 +407,6 @@ public class EventBusConcurrencyTest extends TestBase {
             }
             throw new IllegalStateException("expected subscriber failure");
         }
-    }
-
-    @Test
-    public void callbackReentrancyAndFailuresKeepReservedState() {
-        EventBus bus = EventBus.create();
-        ReentrantHandler handler = new ReentrantHandler(bus);
-        bus.register(handler);
-        assertDoesNotThrow(() -> bus.post(""));
-        assertEquals(2, handler.calls.get());
-        bus.post("\ud83d\ude80");
-        assertEquals(2, handler.calls.get());
     }
 
     public static class DebugEvent {
@@ -357,90 +464,6 @@ public class EventBusConcurrencyTest extends TestBase {
             }
             calls++;
         }
-    }
-
-    @Test
-    public void equalityFormattingAndInvocationRunOutsideTheMonitor() throws Exception {
-        EventBus bus = EventBus.create();
-        DebugHandler handler = new DebugHandler();
-        bus.register(handler);
-        var field = EventBus.class.getDeclaredField("registeredSubMap");
-        field.setAccessible(true);
-        handler.monitor = ((List<?>) ((Map<?, ?>) field.get(bus)).get(handler)).get(0);
-        String name = EventBus.class.getName();
-        var context = (org.apache.logging.log4j.core.LoggerContext) org.apache.logging.log4j.LogManager.getContext(false);
-        var config = context.getConfiguration();
-        var old = config.getLoggers().get(name);
-        config.removeLogger(name);
-        config.addLogger(name, new org.apache.logging.log4j.core.config.LoggerConfig(name, org.apache.logging.log4j.Level.DEBUG, false));
-        context.updateLoggers();
-        try {
-            AtomicInteger strings = new AtomicInteger();
-            AtomicInteger comparisons = new AtomicInteger();
-            bus.post(new DebugEvent(bus, handler.monitor, handler.violation, strings, comparisons));
-            bus.post(new DebugEvent(bus, handler.monitor, handler.violation, strings, comparisons));
-            assertTrue(strings.get() > 0, "Debug formatting must be exercised");
-            assertTrue(comparisons.get() > 0);
-            assertFalse(handler.violation.get(), "Application callbacks must not hold the filtering monitor");
-            assertEquals(2, handler.calls, "Formatting reentry must see the event already reserved");
-        } finally {
-            config.removeLogger(name);
-            if (old != null) {
-                config.addLogger(name, old);
-            }
-            context.updateLoggers();
-        }
-    }
-
-    @Test
-    public void testUnregisterWaitsForConcurrentRegistrationToUpdateBothIndexes() throws Exception {
-        final EventBus eventBus = EventBus.create();
-        final RegistrationSubscriber subscriber = new RegistrationSubscriber();
-        final java.lang.reflect.Field indexField = EventBus.class.getDeclaredField("registeredEventIdSubMap");
-        indexField.setAccessible(true);
-        final Object eventIdIndex = indexField.get(eventBus);
-        final AtomicReference<Throwable> failure = new AtomicReference<>();
-        final Thread registering = new Thread(() -> {
-            try {
-                eventBus.register(subscriber, "concurrent");
-            } catch (Throwable e) {
-                failure.compareAndSet(null, e);
-            }
-        });
-        final Thread unregistering = new Thread(() -> {
-            try {
-                eventBus.unregister(subscriber);
-            } catch (Throwable e) {
-                failure.compareAndSet(null, e);
-            }
-        });
-
-        registering.setDaemon(true);
-        unregistering.setDaemon(true);
-        try {
-            synchronized (eventIdIndex) {
-                // Pause registration after its main-registry update, before its event-ID update.
-                registering.start();
-                awaitBlockedThread(registering);
-                assertEquals(List.of(subscriber), eventBus.allSubscribers());
-
-                unregistering.start();
-                awaitBlockedThread(unregistering);
-                // Removal must wait for the pending registration transaction, otherwise its
-                // later event-ID insertion can leave an unlisted subscriber receiving events.
-                assertEquals(List.of(subscriber), eventBus.allSubscribers());
-            }
-        } finally {
-            registering.join(5000);
-            unregistering.join(5000);
-        }
-
-        assertFalse(registering.isAlive());
-        assertFalse(unregistering.isAlive());
-        assertNull(failure.get());
-        assertTrue(eventBus.allSubscribers().isEmpty());
-        eventBus.post("concurrent", "after removal");
-        assertNull(subscriber.lastEvent);
     }
 
     private static void awaitBlockedThread(final Thread thread) throws InterruptedException {

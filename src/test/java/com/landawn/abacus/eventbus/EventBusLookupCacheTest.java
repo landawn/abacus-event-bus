@@ -20,23 +20,9 @@ import com.landawn.abacus.TestBase;
 
 @Tag("unit")
 public class EventBusLookupCacheTest extends TestBase {
-    private static Map<?, ?> cache(EventBus bus) throws Exception {
-        var field = EventBus.class.getDeclaredField("listOfEventIdSubMap");
-        field.setAccessible(true);
-        return (Map<?, ?>) field.get(bus);
-    }
 
     @Test
-    public void absentIdsAreNotRetained() throws Exception {
-        EventBus bus = EventBus.create();
-        for (int i = 0; i < 10_000; i++) {
-            bus.post("\u8def\u7531\ud83d\ude80-" + i, "");
-        }
-        assertTrue(cache(bus).isEmpty());
-    }
-
-    @Test
-    public void aPreviouslyAbsentIdCanBeRegisteredReplacedAndRemoved() throws Exception {
+    void register_whenPreviouslyAbsentIdChanges_invalidatesLookupCache() throws Exception {
         EventBus bus = EventBus.create();
         String id = "\u4e8b\u4ef6\ud83d\ude80";
         bus.post(id, "before registration");
@@ -56,73 +42,81 @@ public class EventBusLookupCacheTest extends TestBase {
         assertTrue(cache(bus).isEmpty());
     }
 
-    public static class Unfiltered {
-        final List<String> events = new ArrayList<>();
-
-        @Subscribe
-        public void on(String event) {
-            events.add(event);
-        }
-    }
-
+    // annotation-declared event IDs, re-registration under an explicit ID, and final removal.
     @Test
-    public void nullEmptyAndStickyIdsKeepTheirDeliveryRules() throws Exception {
+    void register_whenAnnotationIdsAreOverridden_replacesCachedChannels() throws Exception {
         EventBus bus = EventBus.create();
-        Unfiltered handler = new Unfiltered();
+        MixedIds handler = new MixedIds();
+        MixedIds other = new MixedIds();
         bus.register(handler);
-        bus.post((String) null, "null").post("", "").post("missing", "ignored");
-        assertEquals(List.of("null", ""), handler.events);
-        assertTrue(cache(bus).isEmpty());
-        String id = "\u9ecf\u6027\ud83d\ude80";
-        bus.postSticky(id, "retained");
-        assertTrue(cache(bus).isEmpty());
-        class Sticky {
-            final List<String> events = new ArrayList<>();
+        bus.register(other);
+        assertEquals(java.util.Set.of("annotatedA", "annotatedB"), eventIdIndex(bus).keySet());
+        bus.post("annotatedA", "1").post("annotatedB", "2").post("3");
+        assertEquals(List.of("A:1", "B:2", "any:3"), handler.events);
+        assertEquals(List.of("A:1", "B:2", "any:3"), other.events);
 
-            @Subscribe(sticky = true)
+        // Re-registering under an explicit ID files every method under that ID and drops the annotated ones.
+        bus.register(handler, "explicit");
+        assertEquals(java.util.Set.of("annotatedA", "annotatedB", "explicit"), eventIdIndex(bus).keySet());
+        handler.events.clear();
+        other.events.clear();
+        bus.post("annotatedA", "4").post("annotatedB", "5").post("explicit", "6").post("7");
+        assertEquals(3, handler.events.size());
+        assertTrue(handler.events.containsAll(List.of("A:6", "B:6", "any:6")));
+        assertEquals(List.of("A:4", "B:5", "any:7"), other.events);
+
+        bus.unregister(other);
+        assertEquals(java.util.Set.of("explicit"), eventIdIndex(bus).keySet());
+        assertFalse(cache(bus).containsKey("annotatedA"));
+        assertFalse(cache(bus).containsKey("annotatedB"));
+        other.events.clear();
+        handler.events.clear();
+        bus.post("annotatedA", "8").post("annotatedB", "9").post("10");
+        assertTrue(handler.events.isEmpty());
+        assertTrue(other.events.isEmpty());
+
+        bus.register(handler);
+        assertEquals(java.util.Set.of("annotatedA", "annotatedB"), eventIdIndex(bus).keySet());
+        bus.post("explicit", "11").post("annotatedA", "12");
+        assertEquals(List.of("A:12"), handler.events);
+
+        bus.unregister(handler);
+        assertTrue(eventIdIndex(bus).isEmpty());
+        assertTrue(cache(bus).isEmpty());
+        assertTrue(bus.allSubscribers().isEmpty());
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = "cached-id")
+    void register_whenLookupCacheIsWarm_invalidatesBeforeConcurrentPosts(String eventId) throws InterruptedException {
+        EventBus bus = EventBus.create();
+        AtomicInteger earlyDeliveries = new AtomicInteger();
+        AtomicInteger lateDeliveries = new AtomicInteger();
+        Object early = new Object() {
+            @Subscribe
             public void on(String event) {
-                events.add(event);
+                earlyDeliveries.incrementAndGet();
             }
-        }
-        Sticky sticky = new Sticky();
-        bus.register(sticky, id);
-        assertEquals(List.of("retained"), sticky.events);
-        bus.post(id, "next");
-        assertEquals(List.of("retained", "next"), sticky.events);
-        assertTrue(bus.removeAllStickyEvents());
-        bus.unregister(sticky);
-        assertTrue(cache(bus).isEmpty());
-        assertThrows(IllegalArgumentException.class, () -> bus.post(id, null));
-    }
+        };
+        Object late = new Object() {
+            @Subscribe
+            public void on(String event) {
+                lateDeliveries.incrementAndGet();
+            }
+        };
+        bus.register(early, eventId).post(eventId, "warmup");
+        bus.register(late, eventId);
 
-    private static Map<?, ?> eventIdIndex(EventBus bus) throws Exception {
-        var field = EventBus.class.getDeclaredField("registeredEventIdSubMap");
-        field.setAccessible(true);
-        return (Map<?, ?>) field.get(bus);
-    }
+        runConcurrently(20, () -> bus.post(eventId, "after registration"));
 
-    public static class MixedIds {
-        final List<String> events = new ArrayList<>();
-
-        @Subscribe(eventId = "annotatedA")
-        public void onA(String event) {
-            events.add("A:" + event);
-        }
-
-        @Subscribe(eventId = "annotatedB")
-        public void onB(String event) {
-            events.add("B:" + event);
-        }
-
-        @Subscribe
-        public void onAny(String event) {
-            events.add("any:" + event);
-        }
+        assertEquals(21, earlyDeliveries.get());
+        assertEquals(20, lateDeliveries.get(), "A new subscriber must be visible after cache invalidation");
     }
 
     // unregister touches only the event IDs of the removed identifiers; other IDs keep delivering.
     @Test
-    public void unregisterInvalidatesOnlyAffectedEventIds() throws Exception {
+    void unregister_whenSubscriberHasMultipleIds_invalidatesOnlyAffectedEntries() throws Exception {
         EventBus bus = EventBus.create();
         List<String> received = new ArrayList<>();
         List<Subscriber<String>> subscribers = new ArrayList<>();
@@ -176,54 +170,49 @@ public class EventBusLookupCacheTest extends TestBase {
         assertTrue(cache(bus).isEmpty());
     }
 
-    // annotation-declared event IDs, re-registration under an explicit ID, and final removal.
     @Test
-    public void reregistrationReplacesAnnotatedEventIds() throws Exception {
+    void post_whenEventIdIsAbsent_doesNotRetainLookupEntry() throws Exception {
         EventBus bus = EventBus.create();
-        MixedIds handler = new MixedIds();
-        MixedIds other = new MixedIds();
-        bus.register(handler);
-        bus.register(other);
-        assertEquals(java.util.Set.of("annotatedA", "annotatedB"), eventIdIndex(bus).keySet());
-        bus.post("annotatedA", "1").post("annotatedB", "2").post("3");
-        assertEquals(List.of("A:1", "B:2", "any:3"), handler.events);
-        assertEquals(List.of("A:1", "B:2", "any:3"), other.events);
-
-        // Re-registering under an explicit ID files every method under that ID and drops the annotated ones.
-        bus.register(handler, "explicit");
-        assertEquals(java.util.Set.of("annotatedA", "annotatedB", "explicit"), eventIdIndex(bus).keySet());
-        handler.events.clear();
-        other.events.clear();
-        bus.post("annotatedA", "4").post("annotatedB", "5").post("explicit", "6").post("7");
-        assertEquals(3, handler.events.size());
-        assertTrue(handler.events.containsAll(List.of("A:6", "B:6", "any:6")));
-        assertEquals(List.of("A:4", "B:5", "any:7"), other.events);
-
-        bus.unregister(other);
-        assertEquals(java.util.Set.of("explicit"), eventIdIndex(bus).keySet());
-        assertFalse(cache(bus).containsKey("annotatedA"));
-        assertFalse(cache(bus).containsKey("annotatedB"));
-        other.events.clear();
-        handler.events.clear();
-        bus.post("annotatedA", "8").post("annotatedB", "9").post("10");
-        assertTrue(handler.events.isEmpty());
-        assertTrue(other.events.isEmpty());
-
-        bus.register(handler);
-        assertEquals(java.util.Set.of("annotatedA", "annotatedB"), eventIdIndex(bus).keySet());
-        bus.post("explicit", "11").post("annotatedA", "12");
-        assertEquals(List.of("A:12"), handler.events);
-
-        bus.unregister(handler);
-        assertTrue(eventIdIndex(bus).isEmpty());
+        for (int i = 0; i < 10_000; i++) {
+            bus.post("\u8def\u7531\ud83d\ude80-" + i, "");
+        }
         assertTrue(cache(bus).isEmpty());
-        assertTrue(bus.allSubscribers().isEmpty());
+    }
+
+    @Test
+    void post_whenIdsAreNullEmptyOrSticky_preservesRoutingAcrossCacheChanges() throws Exception {
+        EventBus bus = EventBus.create();
+        Unfiltered handler = new Unfiltered();
+        bus.register(handler);
+        bus.post((String) null, "null").post("", "").post("missing", "ignored");
+        assertEquals(List.of("null", ""), handler.events);
+        assertTrue(cache(bus).isEmpty());
+        String id = "\u9ecf\u6027\ud83d\ude80";
+        bus.postSticky(id, "retained");
+        assertTrue(cache(bus).isEmpty());
+        class Sticky {
+            final List<String> events = new ArrayList<>();
+
+            @Subscribe(sticky = true)
+            public void on(String event) {
+                events.add(event);
+            }
+        }
+        Sticky sticky = new Sticky();
+        bus.register(sticky, id);
+        assertEquals(List.of("retained"), sticky.events);
+        bus.post(id, "next");
+        assertEquals(List.of("retained", "next"), sticky.events);
+        assertTrue(bus.removeAllStickyEvents());
+        bus.unregister(sticky);
+        assertTrue(cache(bus).isEmpty());
+        assertThrows(IllegalArgumentException.class, () -> bus.post(id, null));
     }
 
     @ParameterizedTest
     @NullAndEmptySource
     @ValueSource(strings = "concurrent-id")
-    public void concurrentPostsDeliverOncePerSubscriberWhileCacheIsCold(String eventId) throws InterruptedException {
+    void post_whenConcurrentLookupsStartCold_deliversOncePerSubscriber(String eventId) throws InterruptedException {
         EventBus bus = EventBus.create();
         AtomicInteger deliveries = new AtomicInteger();
         Object subscriber = new Object() {
@@ -239,31 +228,43 @@ public class EventBusLookupCacheTest extends TestBase {
         assertEquals(20, deliveries.get(), "Every concurrent post must deliver exactly once");
     }
 
-    @ParameterizedTest
-    @NullAndEmptySource
-    @ValueSource(strings = "cached-id")
-    public void registrationInvalidatesWarmCacheBeforeConcurrentPosts(String eventId) throws InterruptedException {
-        EventBus bus = EventBus.create();
-        AtomicInteger earlyDeliveries = new AtomicInteger();
-        AtomicInteger lateDeliveries = new AtomicInteger();
-        Object early = new Object() {
-            @Subscribe
-            public void on(String event) {
-                earlyDeliveries.incrementAndGet();
-            }
-        };
-        Object late = new Object() {
-            @Subscribe
-            public void on(String event) {
-                lateDeliveries.incrementAndGet();
-            }
-        };
-        bus.register(early, eventId).post(eventId, "warmup");
-        bus.register(late, eventId);
+    private static Map<?, ?> cache(EventBus bus) throws Exception {
+        var field = EventBus.class.getDeclaredField("listOfEventIdSubMap");
+        field.setAccessible(true);
+        return (Map<?, ?>) field.get(bus);
+    }
 
-        runConcurrently(20, () -> bus.post(eventId, "after registration"));
+    public static class Unfiltered {
+        final List<String> events = new ArrayList<>();
 
-        assertEquals(21, earlyDeliveries.get());
-        assertEquals(20, lateDeliveries.get(), "A new subscriber must be visible after cache invalidation");
+        @Subscribe
+        public void on(String event) {
+            events.add(event);
+        }
+    }
+
+    private static Map<?, ?> eventIdIndex(EventBus bus) throws Exception {
+        var field = EventBus.class.getDeclaredField("registeredEventIdSubMap");
+        field.setAccessible(true);
+        return (Map<?, ?>) field.get(bus);
+    }
+
+    public static class MixedIds {
+        final List<String> events = new ArrayList<>();
+
+        @Subscribe(eventId = "annotatedA")
+        public void onA(String event) {
+            events.add("A:" + event);
+        }
+
+        @Subscribe(eventId = "annotatedB")
+        public void onB(String event) {
+            events.add("B:" + event);
+        }
+
+        @Subscribe
+        public void onAny(String event) {
+            events.add("any:" + event);
+        }
     }
 }

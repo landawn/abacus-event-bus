@@ -14,9 +14,10 @@ import com.landawn.abacus.TestBase;
 
 @Tag("unit")
 public class EventBusClassLoaderTest extends TestBase {
+
     @Test
     @Timeout(15)
-    void unregisteredSubscriberMetadataDoesNotPinItsLoader() throws Exception {
+    void unregister_whenSubscriberIsDiscarded_allowsClassLoaderCollection() throws Exception {
         EventBus bus = EventBus.create();
         WeakReference<ClassLoader> loader = registerDisposableSubscriber(bus);
         awaitCollected(loader);
@@ -25,7 +26,7 @@ public class EventBusClassLoaderTest extends TestBase {
 
     @Test
     @Timeout(15)
-    void unmatchedEventTypesDoNotAccumulateInLongLivedSubscribers() throws Exception {
+    void post_whenEventTypeDoesNotMatch_allowsClassLoaderCollection() throws Exception {
         EventBus bus = EventBus.create();
         ParentSubscriber subscriber = new ParentSubscriber();
         bus.register(subscriber);
@@ -95,5 +96,4 @@ public class EventBusClassLoaderTest extends TestBase {
             }
         };
     }
-
 }
