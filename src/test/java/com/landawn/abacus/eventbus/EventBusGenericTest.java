@@ -35,6 +35,97 @@ public class EventBusGenericTest extends TestBase {
     }
 
     @Test
+    void register_whenObjectSubscriberIsAnnotated_discoversContractAndAdditionalHandler() {
+        EventBus bus = EventBus.create();
+        AnnotatedObjectSubscriber handler = new AnnotatedObjectSubscriber();
+        bus.register(handler);
+
+        bus.post("text");
+        bus.post(42);
+
+        assertEquals(List.of("text", 42), handler.objects);
+        assertEquals(List.of(42), handler.numbers);
+        assertEquals(1, bus.countOfSubscribers());
+    }
+
+    @Test
+    void register_whenPublicHandlerIsInherited_deliversMatchingEvent() {
+        EventBus eventBus = EventBus.create();
+        InheritedSubscriberChild subscriber = new InheritedSubscriberChild();
+
+        eventBus.register(subscriber, "inherited");
+        eventBus.post("inherited", "inherited-event");
+
+        assertEquals(List.of("inherited-event"), subscriber.receivedEvents);
+    }
+
+    @Test
+    void register_whenSubclassOverridesHandler_usesSubclassMetadata() {
+        EventBus eventBus = EventBus.create();
+        ChildOverrideSubscriber subscriber = new ChildOverrideSubscriber();
+
+        eventBus.register(subscriber);
+        eventBus.post("base", "ignored");
+        eventBus.post("child", "handled");
+
+        assertEquals(List.of("handled"), subscriber.events);
+    }
+
+    @Test
+    void register_whenClassAndInterfaceAnnotationsDiffer_prefersClassMetadata() {
+        final EventBus bus = EventBus.create();
+        final ClassWins handler = new ClassWins();
+        bus.register(handler);
+        bus.post("class", "correct");
+        bus.post("interface", "wrong");
+        assertEquals(List.of("correct"), handler.values);
+    }
+
+    @Test
+    void register_whenDiamondInterfacesAgree_deliversSpecializedHandlerOnce() {
+        EventBus bus = EventBus.create();
+        DiamondHandler handler = new DiamondHandler();
+        bus.register(handler);
+
+        bus.post("diamond", "matching");
+        bus.post("diamond", 42);
+        bus.post("other", "wrong channel");
+
+        assertEquals(List.of("matching"), handler.values);
+        assertEquals(List.of(handler), bus.subscribers("diamond", String.class));
+        assertFalse(bus.hasSubscribers(Integer.class));
+    }
+
+    @Test
+    void register_whenInheritedAnnotationsConflict_leavesRegistryEmpty() {
+        final EventBus bus = EventBus.create();
+        final IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> bus.register(new Conflicting()));
+        assertTrue(error.getMessage().contains("Conflicting @Subscribe"));
+        assertEquals(0, bus.countOfSubscribers());
+        final ResolvedConflict handler = new ResolvedConflict();
+        bus.register(handler);
+        bus.post("resolved", "");
+        bus.post("other", "wrong");
+        assertEquals(1, handler.calls);
+    }
+
+    @Test
+    void register_whenGenericTypeIsResolvedThroughHierarchy_allowsUnqualifiedDelivery() {
+        final EventBus bus = EventBus.create();
+        final Strings handler = new Strings();
+        bus.register(handler);
+        bus.post("");
+        bus.post("\u03bb\ud83d\ude00");
+        bus.post(1);
+        assertEquals(List.of("", "\u03bb\ud83d\ude00"), handler.values);
+        assertFalse(bus.hasSubscribers(Integer.class));
+        assertEquals(List.of(handler), bus.subscribers(String.class));
+        bus.unregister(handler);
+        assertFalse(bus.hasSubscribers(String.class));
+        assertThrows(IllegalArgumentException.class, () -> bus.post(null));
+    }
+
+    @Test
     void register_whenGenericOverrideIsAnnotated_usesChildConfigurationOnce() {
         final EventBus bus = EventBus.create();
         final ConcreteHandler handler = new ConcreteHandler();
@@ -59,19 +150,23 @@ public class EventBusGenericTest extends TestBase {
     }
 
     @Test
-    void register_whenGenericTypeIsResolvedThroughHierarchy_allowsUnqualifiedDelivery() {
+    void register_whenInheritedGenericHandlerIsStrict_preservesExactType() {
         final EventBus bus = EventBus.create();
-        final Strings handler = new Strings();
+        final AnnotatedStrings handler = new AnnotatedStrings();
         bus.register(handler);
-        bus.post("");
-        bus.post("\u03bb\ud83d\ude00");
-        bus.post(1);
-        assertEquals(List.of("", "\u03bb\ud83d\ude00"), handler.values);
-        assertFalse(bus.hasSubscribers(Integer.class));
-        assertEquals(List.of(handler), bus.subscribers(String.class));
-        bus.unregister(handler);
         assertFalse(bus.hasSubscribers(String.class));
-        assertThrows(IllegalArgumentException.class, () -> bus.post(null));
+        assertTrue(bus.hasSubscribers(CharSequence.class));
+        assertEquals(List.of(handler), bus.subscribers("inherited", CharSequence.class));
+    }
+
+    @Test
+    void register_whenPrimitiveAndBoxedOverloadsExist_keepsBothHandlers() {
+        final EventBus bus = EventBus.create();
+        final PrimitiveOverloads handler = new PrimitiveOverloads();
+        bus.register(handler);
+        bus.post(Integer.MIN_VALUE);
+        assertEquals(1, handler.primitives);
+        assertEquals(1, handler.boxes);
     }
 
     @Test
@@ -99,49 +194,6 @@ public class EventBusGenericTest extends TestBase {
         bus.post(Double.NaN);
         bus.post("wrong");
         assertEquals(List.of(1, Double.NaN), handler.values);
-    }
-
-    @Test
-    void register_whenPrimitiveAndBoxedOverloadsExist_keepsBothHandlers() {
-        final EventBus bus = EventBus.create();
-        final PrimitiveOverloads handler = new PrimitiveOverloads();
-        bus.register(handler);
-        bus.post(Integer.MIN_VALUE);
-        assertEquals(1, handler.primitives);
-        assertEquals(1, handler.boxes);
-    }
-
-    @Test
-    void register_whenClassAndInterfaceAnnotationsDiffer_prefersClassMetadata() {
-        final EventBus bus = EventBus.create();
-        final ClassWins handler = new ClassWins();
-        bus.register(handler);
-        bus.post("class", "correct");
-        bus.post("interface", "wrong");
-        assertEquals(List.of("correct"), handler.values);
-    }
-
-    @Test
-    void register_whenInheritedGenericHandlerIsStrict_preservesExactType() {
-        final EventBus bus = EventBus.create();
-        final AnnotatedStrings handler = new AnnotatedStrings();
-        bus.register(handler);
-        assertFalse(bus.hasSubscribers(String.class));
-        assertTrue(bus.hasSubscribers(CharSequence.class));
-        assertEquals(List.of(handler), bus.subscribers("inherited", CharSequence.class));
-    }
-
-    @Test
-    void register_whenInheritedAnnotationsConflict_leavesRegistryEmpty() {
-        final EventBus bus = EventBus.create();
-        final IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> bus.register(new Conflicting()));
-        assertTrue(error.getMessage().contains("Conflicting @Subscribe"));
-        assertEquals(0, bus.countOfSubscribers());
-        final ResolvedConflict handler = new ResolvedConflict();
-        bus.register(handler);
-        bus.post("resolved", "");
-        bus.post("other", "wrong");
-        assertEquals(1, handler.calls);
     }
 
     @Test
@@ -179,58 +231,6 @@ public class EventBusGenericTest extends TestBase {
         bus.post("\u03bb");
         bus.post(1);
         assertEquals(List.of("\u03bb"), handler.values);
-    }
-
-    @Test
-    void register_whenPublicHandlerIsInherited_deliversMatchingEvent() {
-        EventBus eventBus = EventBus.create();
-        InheritedSubscriberChild subscriber = new InheritedSubscriberChild();
-
-        eventBus.register(subscriber, "inherited");
-        eventBus.post("inherited", "inherited-event");
-
-        assertEquals(List.of("inherited-event"), subscriber.receivedEvents);
-    }
-
-    @Test
-    void register_whenSubclassOverridesHandler_usesSubclassMetadata() {
-        EventBus eventBus = EventBus.create();
-        ChildOverrideSubscriber subscriber = new ChildOverrideSubscriber();
-
-        eventBus.register(subscriber);
-        eventBus.post("base", "ignored");
-        eventBus.post("child", "handled");
-
-        assertEquals(List.of("handled"), subscriber.events);
-    }
-
-    @Test
-    void register_whenDiamondInterfacesAgree_deliversSpecializedHandlerOnce() {
-        EventBus bus = EventBus.create();
-        DiamondHandler handler = new DiamondHandler();
-        bus.register(handler);
-
-        bus.post("diamond", "matching");
-        bus.post("diamond", 42);
-        bus.post("other", "wrong channel");
-
-        assertEquals(List.of("matching"), handler.values);
-        assertEquals(List.of(handler), bus.subscribers("diamond", String.class));
-        assertFalse(bus.hasSubscribers(Integer.class));
-    }
-
-    @Test
-    void register_whenObjectSubscriberIsAnnotated_discoversContractAndAdditionalHandler() {
-        EventBus bus = EventBus.create();
-        AnnotatedObjectSubscriber handler = new AnnotatedObjectSubscriber();
-        bus.register(handler);
-
-        bus.post("text");
-        bus.post(42);
-
-        assertEquals(List.of("text", 42), handler.objects);
-        assertEquals(List.of(42), handler.numbers);
-        assertEquals(1, bus.countOfSubscribers());
     }
 
     public interface DiamondRoot<T> {

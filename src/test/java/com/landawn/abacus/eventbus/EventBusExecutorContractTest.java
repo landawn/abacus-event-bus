@@ -72,6 +72,8 @@ public class EventBusExecutorContractTest extends TestBase {
 
     @Test
     void create_whenExecutorNeedsNoLifecycleManagement_addsNoShutdownHook() throws Exception {
+        // Initialize the shared runtime before measuring hooks added by individual factory calls.
+        EventBus.getDefault();
         final int before = applicationShutdownHookCount();
 
         EventBus.create("plain-executor", Runnable::run);

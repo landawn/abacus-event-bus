@@ -1,20 +1,23 @@
 package com.landawn.abacus.eventbus;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import com.landawn.abacus.TestBase;
 import com.landawn.abacus.util.ThreadMode;
@@ -29,77 +32,67 @@ public class EventBusRegistrationTest extends TestBase {
         eventBus = EventBus.create();
     }
 
-    @Test
-    void register_whenAnnotated_tracksSubscriberAndReturnsBus() {
-        TestSubscriber subscriber = new TestSubscriber();
-        EventBus result = eventBus.register(subscriber);
+    @ParameterizedTest(name = "overload={0}")
+    @EnumSource(RegistrationOverload.class)
+    void register_whenAnnotatedOverloadIsUsed_tracksSubscriberAndDeliversOnSelectedChannel(RegistrationOverload overload) {
+        StringSubscriber subscriber = new StringSubscriber();
+
+        assertSame(eventBus, overload.register(eventBus, subscriber));
+
+        assertEquals(List.of(subscriber), eventBus.allSubscribers());
+        assertEquals(List.of(subscriber), eventBus.subscribers(overload.eventId, String.class));
+        eventBus.post(overload.eventId, "matching");
+        eventBus.post("other", "ignored");
+        assertEquals(List.of("matching"), subscriber.receivedEvents);
+    }
+
+    @ParameterizedTest(name = "callback={0}, explicitMode={1}")
+    @MethodSource("callbackRegistrations")
+    void register_whenCallbackFormIsSupported_deliversMatchingEvents(CallbackStyle style, boolean explicitMode) {
+        List<String> received = new ArrayList<>();
+        Subscriber<String> subscriber = style.create(received);
+
+        EventBus result = explicitMode ? eventBus.register(subscriber, "callback", ThreadMode.DEFAULT) : eventBus.register(subscriber, "callback");
 
         assertSame(eventBus, result);
-        assertEquals(1, eventBus.allSubscribers().size());
+        assertEquals(List.of(subscriber), eventBus.subscribers("callback", String.class));
+        eventBus.post("other", "ignored").post("callback", "first").post("callback", "second");
+        assertEquals(List.of("first", "second"), received);
     }
 
-    @Test
-    void register_whenIdProvided_tracksSubscriberInChannel() {
-        TestSubscriber subscriber = new TestSubscriber();
-        EventBus result = eventBus.register(subscriber, "testEvent");
+    @ParameterizedTest(name = "eventId={0}")
+    @NullAndEmptySource
+    @ValueSource(strings = "override")
+    void register_whenIdOverrideIsProvided_usesOverrideOrAnnotationDefault(String eventId) {
+        List<String> received = new ArrayList<>();
+        Object subscriber = new Object() {
+            @Subscribe(eventId = "annotated")
+            public void onEvent(String event) {
+                received.add(event);
+            }
+        };
+        String selectedId = eventId == null || eventId.isEmpty() ? "annotated" : eventId;
+        String otherId = selectedId.equals("annotated") ? "override" : "annotated";
 
-        assertSame(eventBus, result);
-        assertEquals(1, eventBus.subscribers("testEvent", String.class).size());
-    }
+        eventBus.register(subscriber, eventId);
+        eventBus.post(selectedId, "matching").post(otherId, "ignored").post("unqualified");
 
-    @Test
-    void register_whenModeProvided_tracksSubscriberAndReturnsBus() {
-        TestSubscriber subscriber = new TestSubscriber();
-        EventBus result = eventBus.register(subscriber, ThreadMode.DEFAULT);
-
-        assertSame(eventBus, result);
-        assertEquals(1, eventBus.allSubscribers().size());
-    }
-
-    @Test
-    void register_whenIdAndModeProvided_tracksSubscriberInChannel() {
-        TestSubscriber subscriber = new TestSubscriber();
-        EventBus result = eventBus.register(subscriber, "testEvent", ThreadMode.DEFAULT);
-
-        assertSame(eventBus, result);
-        assertEquals(1, eventBus.subscribers("testEvent", String.class).size());
-    }
-
-    @Test
-    void register_whenLambdaHasId_deliversMatchingEvent() {
-        AtomicReference<String> received = new AtomicReference<>();
-        Subscriber<String> subscriber = event -> received.set(event);
-
-        eventBus.register(subscriber, "lambdaEvent");
-        eventBus.post("lambdaEvent", "Hello Lambda");
-
-        assertEquals("Hello Lambda", received.get());
-    }
-
-    @Test
-    void register_whenLambdaHasExplicitDefaultMode_deliversMatchingEvent() {
-        AtomicReference<String> received = new AtomicReference<>();
-        Subscriber<String> subscriber = event -> received.set(event);
-
-        eventBus.register(subscriber, "lambdaEvent", ThreadMode.DEFAULT);
-        eventBus.post("lambdaEvent", "Hello Lambda");
-
-        assertEquals("Hello Lambda", received.get());
+        assertEquals(List.of("matching"), received);
+        assertEquals(List.of(subscriber), eventBus.subscribers(selectedId, String.class));
+        assertTrue(eventBus.subscribers(otherId, String.class).isEmpty());
     }
 
     @Test
     void register_whenSameInstanceIsRegisteredAgain_replacesPreviousChannel() {
-        TestSubscriber subscriber = new TestSubscriber();
+        StringSubscriber subscriber = new StringSubscriber();
         eventBus.register(subscriber, "id1");
         eventBus.register(subscriber, "id2");
 
-        // After re-registration, subscriber should be under id2 now
         assertEquals(1, eventBus.allSubscribers().size());
 
         eventBus.post("id1", "msg1");
         eventBus.post("id2", "msg2");
 
-        // Should only receive msg2 since re-registered under id2
         assertEquals(List.of("msg2"), subscriber.receivedEvents);
 
         eventBus.unregister(subscriber);
@@ -147,19 +140,19 @@ public class EventBusRegistrationTest extends TestBase {
     }
 
     @Test
-    void register_whenAnnotatedMethodIsStatic_rejectsSubscriber() {
-        assertThrows(RuntimeException.class, () -> eventBus.register(new StaticAnnotatedSubscriber()));
-    }
-
-    @Test
     void register_whenSubscriberIsNull_rejectsArgument() {
         assertThrows(IllegalArgumentException.class, () -> eventBus.register(null));
     }
 
-    @Test
-    void register_whenAnnotatedMethodIsPrivateAndStatic_rejectsStaticMethod() {
-        final RuntimeException e = assertThrows(RuntimeException.class, () -> eventBus.register(new PrivateStaticAnnotatedSubscriber()));
-        assertTrue(e.getMessage().contains("must not be static"), e.getMessage());
+    @ParameterizedTest(name = "privateMethod={0}")
+    @ValueSource(booleans = { false, true })
+    void register_whenAnnotatedMethodIsStatic_rejectsRegardlessOfVisibility(boolean privateMethod) {
+        Object subscriber = privateMethod ? new PrivateStaticAnnotatedSubscriber() : new StaticAnnotatedSubscriber();
+
+        RuntimeException failure = assertThrows(RuntimeException.class, () -> eventBus.register(subscriber));
+
+        assertTrue(failure.getMessage().contains("must not be static"), failure.getMessage());
+        assertTrue(eventBus.allSubscribers().isEmpty());
     }
 
     @Test
@@ -168,9 +161,9 @@ public class EventBusRegistrationTest extends TestBase {
         assertTrue(e.getMessage().startsWith("No subscriber method found"), e.getMessage());
     }
 
-    @Test
-    void register_whenAnnotatedArityIsInvalid_leavesRegistryEmpty() {
-        EventBus eventBus = EventBus.create();
+    @ParameterizedTest(name = "parameterCount={0}")
+    @ValueSource(ints = { 0, 2 })
+    void register_whenAnnotatedArityIsInvalid_leavesRegistryEmpty(int parameterCount) {
         class NoParameters {
             @Subscribe
             public void onEvent() {
@@ -181,12 +174,12 @@ public class EventBusRegistrationTest extends TestBase {
             public void onEvent(String first, String second) {
             }
         }
+        Object subscriber = parameterCount == 0 ? new NoParameters() : new TwoParameters();
 
-        RuntimeException noParameters = assertThrows(RuntimeException.class, () -> eventBus.register(new NoParameters()));
-        assertTrue(noParameters.getMessage().contains("0 parameters"), noParameters.getMessage());
-        RuntimeException twoParameters = assertThrows(RuntimeException.class, () -> eventBus.register(new TwoParameters()));
-        assertTrue(twoParameters.getMessage().contains("2 parameters"), twoParameters.getMessage());
-        assertEquals(0, eventBus.countOfSubscribers(), "Invalid methods must not leave partial registrations");
+        RuntimeException failure = assertThrows(RuntimeException.class, () -> eventBus.register(subscriber));
+
+        assertTrue(failure.getMessage().contains(parameterCount + " parameters"), failure.getMessage());
+        assertTrue(eventBus.allSubscribers().isEmpty(), "Invalid methods must not leave partial registrations");
     }
 
     @ParameterizedTest
@@ -211,121 +204,85 @@ public class EventBusRegistrationTest extends TestBase {
         assertEquals(List.of("value"), received);
     }
 
-    @ParameterizedTest
-    @NullAndEmptySource
-    void register_whenIdOverrideIsNullOrEmpty_preservesAnnotationId(String eventId) {
+    @Test
+    void register_whenReplacementIsInvalid_preservesExistingSubscription() {
         List<String> received = new ArrayList<>();
-        Object subscriber = new Object() {
-            @Subscribe(eventId = "annotated")
-            public void onEvent(String event) {
-                received.add(event);
-            }
-        };
+        Subscriber<String> subscriber = received::add;
+        eventBus.register(subscriber, "existing");
+
+        assertThrows(IllegalStateException.class, () -> eventBus.register(subscriber));
+
+        assertEquals(List.of(subscriber), eventBus.allSubscribers());
+        assertEquals(List.of(subscriber), eventBus.subscribers("existing", String.class));
+        eventBus.post("existing", "still registered");
+        assertEquals(List.of("still registered"), received);
+    }
+
+    @ParameterizedTest(name = "lambdaSubscriber={0}")
+    @ValueSource(booleans = { false, true })
+    void unregister_whenSubscriberIsRemoved_stopsDeliveryAndRemainsIdempotent(boolean lambdaSubscriber) {
+        List<String> received = new ArrayList<>();
+        Object subscriber = lambdaSubscriber ? (Subscriber<String>) received::add : new StringSubscriber(received);
+        String eventId = lambdaSubscriber ? "callback" : null;
         eventBus.register(subscriber, eventId);
-        eventBus.post("annotated", "matching").post("unqualified");
+        eventBus.post(eventId, "before");
+        assertEquals(List.of("before"), received);
 
-        assertEquals(List.of("matching"), received);
-    }
+        assertSame(eventBus, eventBus.unregister(subscriber));
+        assertSame(eventBus, eventBus.unregister(subscriber));
+        eventBus.post(eventId, "after");
 
-    @Test
-    void register_whenIdOverrideIsPresent_replacesAnnotationId() {
-        List<String> received = new ArrayList<>();
-        Object subscriber = new Object() {
-            @Subscribe(eventId = "annotated")
-            public void onEvent(String event) {
-                received.add(event);
-            }
-        };
-        eventBus.register(subscriber, "override");
-        eventBus.post("annotated", "ignored").post("override", "matching");
-
-        assertEquals(List.of("matching"), received);
-        assertTrue(eventBus.subscribers("annotated", String.class).isEmpty());
-        assertEquals(List.of(subscriber), eventBus.subscribers("override", String.class));
-    }
-
-    @Test
-    void register_whenSubscriberIsAnonymous_deliversMatchingEvent() {
-        AtomicReference<String> receivedEvent = new AtomicReference<>();
-
-        Subscriber<String> subscriber = new Subscriber<>() {
-            @Override
-            public void on(String event) {
-                receivedEvent.set(event);
-            }
-        };
-
-        eventBus.register(subscriber, "testEvent");
-        eventBus.post("testEvent", "Hello World");
-
-        assertEquals("Hello World", receivedEvent.get());
-    }
-
-    @Test
-    void register_whenSubscriberIsMethodReference_deliversMatchingEvent() {
-        List<String> events = new ArrayList<>();
-
-        Subscriber<String> subscriber = events::add;
-
-        eventBus.register(subscriber, "methodRef");
-        eventBus.post("methodRef", "Method Reference Test");
-
-        assertEquals(List.of("Method Reference Test"), events);
-    }
-
-    @Test
-    void unregister_whenAnnotatedSubscriberIsRemoved_stopsFutureDelivery() {
-        TestSubscriber subscriber = new TestSubscriber();
-        eventBus.register(subscriber);
-
-        eventBus.post("before");
-        assertEquals(1, subscriber.receivedEvents.size());
-
-        eventBus.unregister(subscriber);
-        eventBus.post("after");
-
-        // Should still have only the "before" event
-        assertEquals(List.of("before"), subscriber.receivedEvents);
-    }
-
-    @Test
-    void unregister_whenSubscriberIsUnknown_returnsBus() {
-        TestSubscriber subscriber = new TestSubscriber();
-        // Unregistering a subscriber that was never registered should not throw
-        EventBus result = eventBus.unregister(subscriber);
-        assertSame(eventBus, result);
-    }
-
-    @Test
-    void unregister_whenCalledTwice_remainsIdempotent() {
-        TestSubscriber subscriber = new TestSubscriber();
-        eventBus.register(subscriber);
-
-        EventBus result1 = eventBus.unregister(subscriber);
-        assertSame(eventBus, result1);
-
-        // Second unregister should not throw
-        EventBus result2 = eventBus.unregister(subscriber);
-        assertSame(eventBus, result2);
-
+        assertEquals(List.of("before"), received);
         assertTrue(eventBus.allSubscribers().isEmpty());
+        assertTrue(eventBus.subscribers(eventId, String.class).isEmpty());
     }
 
     @Test
-    void unregister_whenLambdaIsRemoved_stopsFutureDelivery() {
-        AtomicReference<String> receivedEvent = new AtomicReference<>();
+    void unregister_whenSubscriberIsUnknown_preservesRegisteredSubscribers() {
+        StringSubscriber registered = new StringSubscriber();
+        eventBus.register(registered);
 
-        Subscriber<String> subscriber = receivedEvent::set;
+        assertSame(eventBus, eventBus.unregister(new StringSubscriber()));
 
-        eventBus.register(subscriber, "unregTest");
-        eventBus.post("unregTest", "First Event");
-        assertEquals("First Event", receivedEvent.get());
+        assertEquals(List.of(registered), eventBus.allSubscribers());
+        eventBus.post("still registered");
+        assertEquals(List.of("still registered"), registered.receivedEvents);
+    }
 
-        eventBus.unregister(subscriber);
-        receivedEvent.set(null);
+    enum RegistrationOverload {
+        SUBSCRIBER(null), SUBSCRIBER_AND_ID("named"), SUBSCRIBER_AND_MODE(null), SUBSCRIBER_ID_AND_MODE("named");
 
-        eventBus.post("unregTest", "Second Event");
-        assertNull(receivedEvent.get());
+        final String eventId;
+
+        RegistrationOverload(String eventId) {
+            this.eventId = eventId;
+        }
+
+        EventBus register(EventBus bus, Object subscriber) {
+            return switch (this) {
+                case SUBSCRIBER -> bus.register(subscriber);
+                case SUBSCRIBER_AND_ID -> bus.register(subscriber, eventId);
+                case SUBSCRIBER_AND_MODE -> bus.register(subscriber, ThreadMode.DEFAULT);
+                case SUBSCRIBER_ID_AND_MODE -> bus.register(subscriber, eventId, ThreadMode.DEFAULT);
+            };
+        }
+    }
+
+    enum CallbackStyle {
+        LAMBDA, METHOD_REFERENCE, ANONYMOUS;
+
+        Subscriber<String> create(List<String> received) {
+            return switch (this) {
+                case LAMBDA -> event -> received.add(event);
+                case METHOD_REFERENCE -> received::add;
+                case ANONYMOUS -> new Subscriber<>() {
+                    @Override
+                    public void on(String event) {
+                        received.add(event);
+                    }
+                };
+            };
+        }
     }
 
     static final class EqualSubscriber {
@@ -352,8 +309,16 @@ public class EventBusRegistrationTest extends TestBase {
         }
     }
 
-    public static class TestSubscriber {
-        final List<String> receivedEvents = new ArrayList<>();
+    public static class StringSubscriber {
+        final List<String> receivedEvents;
+
+        StringSubscriber() {
+            this(new ArrayList<>());
+        }
+
+        StringSubscriber(List<String> receivedEvents) {
+            this.receivedEvents = receivedEvents;
+        }
 
         @Subscribe
         public void onEvent(String event) {
@@ -364,7 +329,6 @@ public class EventBusRegistrationTest extends TestBase {
     public static class StaticAnnotatedSubscriber {
         @Subscribe
         public static void onEvent(String event) {
-            // static method - should be rejected
         }
     }
 
@@ -387,5 +351,9 @@ public class EventBusRegistrationTest extends TestBase {
         @Subscribe
         private void onEvent(String event) {
         }
+    }
+
+    private static Stream<Arguments> callbackRegistrations() {
+        return Stream.of(CallbackStyle.values()).flatMap(style -> Stream.of(Arguments.of(style, false), Arguments.of(style, true)));
     }
 }

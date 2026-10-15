@@ -8,13 +8,13 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.util.ArrayList;
 import java.util.List;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -31,26 +31,17 @@ public class EventBusTest extends TestBase {
     }
 
     @Test
-    void getDefault_whenCalledRepeatedly_returnsNamedSingleton() {
-        EventBus defaultBus = EventBus.getDefault();
-        assertNotNull(defaultBus);
-        assertEquals("default", defaultBus.identifier());
-        assertSame(defaultBus, EventBus.getDefault());
-    }
+    void create_whenUnnamed_assignsNonEmptyDistinctIdentifiers() {
+        EventBus first = EventBus.create();
+        EventBus second = EventBus.create();
+        assertNotNull(first);
+        assertNotNull(second);
 
-    @Test
-    void create_whenUnnamed_assignsNonEmptyIdentifier() {
-        EventBus bus = EventBus.create();
-        assertNotNull(bus);
-        assertNotNull(bus.identifier());
-        assertFalse(bus.identifier().isEmpty());
-    }
-
-    @Test
-    void create_whenCalledTwice_assignsDistinctIdentifiers() {
-        EventBus bus1 = EventBus.create();
-        EventBus bus2 = EventBus.create();
-        assertNotEquals(bus1.identifier(), bus2.identifier());
+        assertNotNull(first.identifier());
+        assertNotNull(second.identifier());
+        assertFalse(first.identifier().isEmpty());
+        assertFalse(second.identifier().isEmpty());
+        assertNotEquals(first.identifier(), second.identifier());
     }
 
     @Test
@@ -65,13 +56,20 @@ public class EventBusTest extends TestBase {
     }
 
     @Test
+    void getDefault_whenCalledRepeatedly_returnsNamedSingleton() {
+        EventBus defaultBus = EventBus.getDefault();
+        assertNotNull(defaultBus);
+        assertEquals("default", defaultBus.identifier());
+        assertSame(defaultBus, EventBus.getDefault());
+    }
+
+    @Test
     void subscribers_whenTypeMatches_returnsOnlyMatchingSubscribers() {
-        TestSubscriber subscriber = new TestSubscriber();
+        StringSubscriber subscriber = new StringSubscriber();
         eventBus.register(subscriber);
 
         List<Object> subscribers = eventBus.subscribers(String.class);
-        assertEquals(1, subscribers.size());
-        assertTrue(subscribers.contains(subscriber));
+        assertEquals(List.of(subscriber), subscribers);
 
         List<Object> noSubscribers = eventBus.subscribers(Integer.class);
         assertTrue(noSubscribers.isEmpty());
@@ -86,7 +84,7 @@ public class EventBusTest extends TestBase {
         eventBus.register(subscriber, "testId");
 
         List<Object> subscribers = eventBus.subscribers("testId", String.class);
-        assertTrue(subscribers.contains(subscriber));
+        assertEquals(List.of(subscriber), subscribers);
 
         eventBus.unregister(subscriber);
     }
@@ -98,34 +96,32 @@ public class EventBusTest extends TestBase {
 
         // SubEvent extends BaseEvent, so subscriber should appear for SubEvent (because onBaseEvent accepts it)
         List<Object> baseSubs = eventBus.subscribers(BaseEvent.class);
-        assertTrue(baseSubs.contains(subscriber));
+        assertEquals(List.of(subscriber), baseSubs);
 
         List<Object> subSubs = eventBus.subscribers(SubEvent.class);
-        assertTrue(subSubs.contains(subscriber));
+        assertEquals(List.of(subscriber), subSubs);
 
         eventBus.unregister(subscriber);
     }
 
     @Test
     void subscribers_whenIdsDiffer_keepsChannelsSeparate() {
-        TestSubscriber subscriber1 = new TestSubscriber();
-        TestSubscriber subscriber2 = new TestSubscriber();
+        StringSubscriber subscriber1 = new StringSubscriber();
+        StringSubscriber subscriber2 = new StringSubscriber();
 
         eventBus.register(subscriber1, "event1");
         eventBus.register(subscriber2, "event2");
 
         List<Object> subscribers = eventBus.subscribers("event1", String.class);
-        assertEquals(1, subscribers.size());
-        assertTrue(subscribers.contains(subscriber1));
+        assertEquals(List.of(subscriber1), subscribers);
 
         subscribers = eventBus.subscribers("event2", String.class);
-        assertEquals(1, subscribers.size());
-        assertTrue(subscribers.contains(subscriber2));
+        assertEquals(List.of(subscriber2), subscribers);
     }
 
     @Test
     void subscribers_whenIdIsUnknown_returnsEmptySnapshot() {
-        TestSubscriber subscriber = new TestSubscriber();
+        StringSubscriber subscriber = new StringSubscriber();
         eventBus.register(subscriber, "myId");
 
         List<Object> result = eventBus.subscribers("nonExistent", String.class);
@@ -134,38 +130,40 @@ public class EventBusTest extends TestBase {
         eventBus.unregister(subscriber);
     }
 
-    @Test
-    void subscribers_whenBusIsEmpty_returnsEmptySnapshot() {
-        List<Object> subscribers = eventBus.subscribers(String.class);
-        assertNotNull(subscribers);
-        assertTrue(subscribers.isEmpty());
-    }
-
     @ParameterizedTest
     @NullAndEmptySource
     void subscribers_whenIdIsNullOrEmpty_usesUnqualifiedChannel(String eventId) {
-        TestSubscriber subscriber = new TestSubscriber();
+        StringSubscriber subscriber = new StringSubscriber();
         eventBus.register(subscriber);
 
         assertEquals(List.of(subscriber), eventBus.subscribers(eventId, String.class));
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = { false, true })
-    void subscribers_whenQueryResultOrRegistryChanges_keepsSnapshotsIndependent(boolean allSubscribers) {
-        TestSubscriber first = new TestSubscriber();
-        TestSubscriber second = new TestSubscriber();
-        eventBus.register(first);
-        List<Object> snapshot = allSubscribers ? eventBus.allSubscribers() : eventBus.subscribers(String.class);
+    @ParameterizedTest(name = "query={0}")
+    @EnumSource(SubscriberQuery.class)
+    void subscriberQueries_whenBusIsEmpty_returnEmptySnapshots(SubscriberQuery query) {
+        List<Object> snapshot = query.read(eventBus);
+        assertNotNull(snapshot);
+        assertTrue(snapshot.isEmpty());
+    }
 
-        eventBus.register(second);
+    @ParameterizedTest(name = "query={0}")
+    @EnumSource(SubscriberQuery.class)
+    void subscriberQueries_whenSnapshotOrRegistryChanges_keepThemIndependent(SubscriberQuery query) {
+        StringSubscriber first = new StringSubscriber();
+        StringSubscriber second = new StringSubscriber();
+        eventBus.register(first, query.eventId);
+        List<Object> snapshot = query.read(eventBus);
+
+        eventBus.register(second, query.eventId);
         assertEquals(List.of(first), snapshot, "Registration must not update an earlier snapshot");
         snapshot.clear();
         assertEquals(2, eventBus.countOfSubscribers(), "Changing a snapshot must not mutate the registry");
-        List<Object> current = allSubscribers ? eventBus.allSubscribers() : eventBus.subscribers(String.class);
+        List<Object> current = query.read(eventBus);
         assertHaveSameElements(List.of(first, second), current);
         eventBus.unregister(first).unregister(second);
         assertHaveSameElements(List.of(first, second), current);
+        assertTrue(query.read(eventBus).isEmpty());
         assertTrue(eventBus.allSubscribers().isEmpty());
     }
 
@@ -173,7 +171,7 @@ public class EventBusTest extends TestBase {
     @ValueSource(booleans = { false, true })
     void subscriberQueries_whenTypeIsNull_rejectRegardlessOfRegistryContents(boolean populated) {
         if (populated) {
-            eventBus.register(new TestSubscriber());
+            eventBus.register(new StringSubscriber());
         }
 
         assertThrows(IllegalArgumentException.class, () -> eventBus.subscribers((Class<?>) null));
@@ -192,19 +190,10 @@ public class EventBusTest extends TestBase {
         eventBus.register(subscriber2, "id2");
 
         List<Object> allSubscribers = eventBus.allSubscribers();
-        assertEquals(2, allSubscribers.size());
-        assertTrue(allSubscribers.contains(subscriber1));
-        assertTrue(allSubscribers.contains(subscriber2));
+        assertHaveSameElements(List.of(subscriber1, subscriber2), allSubscribers);
 
         eventBus.unregister(subscriber1);
         eventBus.unregister(subscriber2);
-    }
-
-    @Test
-    void allSubscribers_whenBusIsEmpty_returnsEmptySnapshot() {
-        List<Object> all = eventBus.allSubscribers();
-        assertNotNull(all);
-        assertTrue(all.isEmpty());
     }
 
     @Test
@@ -257,33 +246,43 @@ public class EventBusTest extends TestBase {
         assertFalse(eventBus.hasSubscribers(StringBuilder.class));
     }
 
-    public static class TestSubscriber {
-        final List<String> receivedEvents = new ArrayList<>();
+    enum SubscriberQuery {
+        ALL(null), UNQUALIFIED(null), NAMED("named");
+
+        final String eventId;
+
+        SubscriberQuery(String eventId) {
+            this.eventId = eventId;
+        }
+
+        List<Object> read(EventBus bus) {
+            return switch (this) {
+                case ALL -> bus.allSubscribers();
+                case UNQUALIFIED -> bus.subscribers(String.class);
+                case NAMED -> bus.subscribers(eventId, String.class);
+            };
+        }
+    }
+
+    public static class StringSubscriber {
 
         @Subscribe
         public void onEvent(String event) {
-            receivedEvents.add(event);
         }
     }
 
     public static class MultiMethodSubscriber {
-        int stringCount;
-        int integerCount;
-        int doubleCount;
 
         @Subscribe
         public void onString(String event) {
-            stringCount++;
         }
 
         @Subscribe
         public void onInteger(Integer event) {
-            integerCount++;
         }
 
         @Subscribe
         public void onDouble(Double event) {
-            doubleCount++;
         }
     }
 
@@ -294,23 +293,17 @@ public class EventBusTest extends TestBase {
     }
 
     public static class HierarchySubscriber {
-        int baseEventCount;
-        int subEventCount;
-        int subSubEventCount;
 
         @Subscribe
         public void onBaseEvent(BaseEvent event) {
-            baseEventCount++;
         }
 
         @Subscribe
         public void onSubEvent(SubEvent event) {
-            subEventCount++;
         }
 
         @Subscribe
         public void onSubSubEvent(SubSubEvent event) {
-            subSubEventCount++;
         }
     }
 

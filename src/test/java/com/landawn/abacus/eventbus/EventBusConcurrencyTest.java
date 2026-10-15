@@ -6,7 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -61,11 +60,11 @@ public class EventBusConcurrencyTest extends TestBase {
             synchronized (eventIdIndex) {
                 // Pause registration after its main-registry update, before its event-ID update.
                 registering.start();
-                awaitBlockedThread(registering);
+                awaitBlocked(registering);
                 assertEquals(List.of(subscriber), eventBus.allSubscribers());
 
                 unregistering.start();
-                awaitBlockedThread(unregistering);
+                awaitBlocked(unregistering);
                 // Removal must wait for the pending registration transaction, otherwise its
                 // later event-ID insertion can leave an unlisted subscriber receiving events.
                 assertEquals(List.of(subscriber), eventBus.allSubscribers());
@@ -89,10 +88,7 @@ public class EventBusConcurrencyTest extends TestBase {
         EventBus bus = EventBus.create();
         CrossPosting handler = throttle ? new ThrottledCrossPosting(bus) : new DeduplicatedCrossPosting(bus);
         bus.register(handler);
-        AtomicReference<Throwable> failure = new AtomicReference<>();
-        Thread first = start(() -> bus.post(handler.a), failure);
-        Thread second = start(() -> bus.post(handler.b), failure);
-        finished(List.of(first, second), failure);
+        runConcurrently(() -> bus.post(handler.a), () -> bus.post(handler.b));
         assertEquals(2, handler.calls.get());
         assertFalse(handler.coordinationFailed.get(), "Both handlers must enter concurrently");
     }
@@ -109,10 +105,7 @@ public class EventBusConcurrencyTest extends TestBase {
         CountDownLatch posted = new CountDownLatch(2);
         a.onCompare = () -> compareAndPost(comparing, posted, bus, b);
         b.onCompare = () -> compareAndPost(comparing, posted, bus, a);
-        AtomicReference<Throwable> failure = new AtomicReference<>();
-        Thread first = start(() -> bus.post(new EA("next")), failure);
-        Thread second = start(() -> bus.post(new EB("next")), failure);
-        finished(List.of(first, second), failure);
+        runConcurrently(() -> bus.post(new EA("next")), () -> bus.post(new EB("next")));
         assertEquals(4, handler.calls.get());
     }
 
@@ -266,34 +259,6 @@ public class EventBusConcurrencyTest extends TestBase {
         }
     }
 
-    // Daemon threads make the pre-fix deadlock a bounded test failure rather than a stuck test JVM.
-    private static Thread start(Runnable action, AtomicReference<Throwable> failure) {
-        Thread thread = new Thread(() -> {
-            try {
-                action.run();
-            } catch (Throwable e) {
-                failure.compareAndSet(null, e);
-            }
-        }, "eventbus-cross-post");
-        thread.setDaemon(true);
-        thread.start();
-        return thread;
-    }
-
-    private static void finished(List<Thread> threads, AtomicReference<Throwable> failure) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        for (Thread thread : threads) {
-            long remaining = deadline - System.nanoTime();
-            if (remaining > 0) {
-                thread.join(Math.max(1, TimeUnit.NANOSECONDS.toMillis(remaining)));
-            }
-        }
-        assertTrue(threads.stream().noneMatch(Thread::isAlive), "Posting threads must finish without a monitor deadlock");
-        if (failure.get() != null) {
-            fail("Concurrent worker failed", failure.get());
-        }
-    }
-
     public static class EqualityEvent {
         final String value;
         Runnable onCompare;
@@ -346,24 +311,6 @@ public class EventBusConcurrencyTest extends TestBase {
         @Subscribe(deduplicate = true)
         public void b(EB event) {
             calls.incrementAndGet();
-        }
-    }
-
-    private static void compareAndPost(CountDownLatch comparing, CountDownLatch posted, EventBus bus, Object event) {
-        comparing.countDown();
-        try {
-            assertTrue(comparing.await(5, TimeUnit.SECONDS));
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new AssertionError(e);
-        }
-        bus.post(event);
-        posted.countDown();
-        try {
-            assertTrue(posted.await(5, TimeUnit.SECONDS));
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new AssertionError(e);
         }
     }
 
@@ -462,20 +409,30 @@ public class EventBusConcurrencyTest extends TestBase {
         }
     }
 
-    private static void awaitBlockedThread(final Thread thread) throws InterruptedException {
-        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (thread.getState() != Thread.State.BLOCKED && thread.isAlive() && System.nanoTime() < deadline) {
-            Thread.sleep(1);
-        }
-        assertEquals(Thread.State.BLOCKED, thread.getState());
-    }
-
     public static class RegistrationSubscriber {
         String lastEvent;
 
         @Subscribe
         public void onEvent(String event) {
             lastEvent = event;
+        }
+    }
+
+    private static void compareAndPost(CountDownLatch comparing, CountDownLatch posted, EventBus bus, Object event) {
+        comparing.countDown();
+        try {
+            assertTrue(comparing.await(5, TimeUnit.SECONDS));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(e);
+        }
+        bus.post(event);
+        posted.countDown();
+        try {
+            assertTrue(posted.await(5, TimeUnit.SECONDS));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(e);
         }
     }
 }

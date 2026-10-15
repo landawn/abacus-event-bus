@@ -228,12 +228,6 @@ public class EventBusLookupCacheTest extends TestBase {
         assertEquals(20, deliveries.get(), "Every concurrent post must deliver exactly once");
     }
 
-    private static Map<?, ?> cache(EventBus bus) throws Exception {
-        var field = EventBus.class.getDeclaredField("listOfEventIdSubMap");
-        field.setAccessible(true);
-        return (Map<?, ?>) field.get(bus);
-    }
-
     public static class Unfiltered {
         final List<String> events = new ArrayList<>();
 
@@ -241,12 +235,6 @@ public class EventBusLookupCacheTest extends TestBase {
         public void on(String event) {
             events.add(event);
         }
-    }
-
-    private static Map<?, ?> eventIdIndex(EventBus bus) throws Exception {
-        var field = EventBus.class.getDeclaredField("registeredEventIdSubMap");
-        field.setAccessible(true);
-        return (Map<?, ?>) field.get(bus);
     }
 
     public static class MixedIds {
@@ -266,5 +254,17 @@ public class EventBusLookupCacheTest extends TestBase {
         public void onAny(String event) {
             events.add("any:" + event);
         }
+    }
+
+    private static Map<?, ?> cache(EventBus bus) throws Exception {
+        var field = EventBus.class.getDeclaredField("listOfEventIdSubMap");
+        field.setAccessible(true);
+        return (Map<?, ?>) field.get(bus);
+    }
+
+    private static Map<?, ?> eventIdIndex(EventBus bus) throws Exception {
+        var field = EventBus.class.getDeclaredField("registeredEventIdSubMap");
+        field.setAccessible(true);
+        return (Map<?, ?>) field.get(bus);
     }
 }

@@ -1,5 +1,6 @@
 package com.landawn.abacus;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -70,6 +71,15 @@ public abstract class TestBase {
                 }
             }
         }
+    }
+
+    /** Waits for a worker to block on a monitor, with a bounded failure instead of a scheduling sleep. */
+    protected static void awaitBlocked(Thread thread) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (thread.getState() != Thread.State.BLOCKED && thread.isAlive() && System.nanoTime() < deadline) {
+            TimeUnit.MILLISECONDS.sleep(1);
+        }
+        assertEquals(Thread.State.BLOCKED, thread.getState(), "Thread did not reach the expected monitor: " + thread.getName());
     }
 
     /** GC regressions necessarily request collection, but wait only to a fixed deadline. */

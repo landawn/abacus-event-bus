@@ -85,7 +85,7 @@ public class EventBusStickyTest extends TestBase {
 
     @Test
     void postSticky_whenPostedBeforeRegistration_replaysOnceAndReturnsBus() {
-        TestStickySubscriber subscriber = new TestStickySubscriber();
+        StickyStringSubscriber subscriber = new StickyStringSubscriber();
 
         EventBus result = eventBus.postSticky("Sticky Message");
         assertSame(eventBus, result);
@@ -99,7 +99,7 @@ public class EventBusStickyTest extends TestBase {
     void postSticky_whenSubscriberIsAlreadyRegistered_deliversExactlyOnce() {
         // Subscriber already visible before the sticky event is posted: delivered once via postSticky,
         // and register's earlier (empty) sticky snapshot must not also deliver it.
-        TestStickySubscriber sub = new TestStickySubscriber();
+        StickyStringSubscriber sub = new StickyStringSubscriber();
         eventBus.register(sub);
         eventBus.postSticky("only-once");
 
@@ -108,7 +108,7 @@ public class EventBusStickyTest extends TestBase {
 
     @Test
     void postSticky_whenSubscriberIdMatches_replaysRetainedEvent() {
-        TestStickySubscriber subscriber = new TestStickySubscriber();
+        StickyStringSubscriber subscriber = new StickyStringSubscriber();
 
         eventBus.postSticky("stickyEvent", "Sticky Message");
         eventBus.register(subscriber, "stickyEvent");
@@ -120,7 +120,7 @@ public class EventBusStickyTest extends TestBase {
     void postSticky_whenSubscriberIsNotSticky_doesNotReplayRetainedEvent() {
         eventBus.postSticky("old sticky");
 
-        TestSubscriber nonSticky = new TestSubscriber();
+        StringSubscriber nonSticky = new StringSubscriber();
         eventBus.register(nonSticky);
 
         // Non-sticky subscriber should not get the sticky event posted before registration
@@ -134,19 +134,17 @@ public class EventBusStickyTest extends TestBase {
         eventBus.postSticky("sticky1");
         eventBus.postSticky("sticky2");
 
-        TestStickySubscriber subscriber = new TestStickySubscriber();
+        StickyStringSubscriber subscriber = new StickyStringSubscriber();
         eventBus.register(subscriber);
 
-        assertEquals(2, subscriber.receivedEvents.size());
-        assertTrue(subscriber.receivedEvents.contains("sticky1"));
-        assertTrue(subscriber.receivedEvents.contains("sticky2"));
+        assertHaveSameElements(List.of("sticky1", "sticky2"), subscriber.receivedEvents);
     }
 
     @Test
     void postSticky_whenSubscriberIdDiffers_doesNotReplayEvent() {
         eventBus.postSticky("id1", "sticky msg");
 
-        TestStickySubscriber subscriber = new TestStickySubscriber();
+        StickyStringSubscriber subscriber = new StickyStringSubscriber();
         eventBus.register(subscriber, "id2");
 
         // subscriber registered with id2 should not get sticky posted with id1
@@ -195,8 +193,8 @@ public class EventBusStickyTest extends TestBase {
         List<String> retained = eventBus.stickyEvents("new", String.class);
         assertEquals(1, retained.size());
         assertSame(event, retained.get(0));
-        TestStickySubscriber oldChannel = new TestStickySubscriber();
-        TestStickySubscriber newChannel = new TestStickySubscriber();
+        StickyStringSubscriber oldChannel = new StickyStringSubscriber();
+        StickyStringSubscriber newChannel = new StickyStringSubscriber();
         eventBus.register(oldChannel, "old").register(newChannel, "new");
         assertTrue(oldChannel.receivedEvents.isEmpty());
         assertEquals(List.of(event), newChannel.receivedEvents);
@@ -243,9 +241,7 @@ public class EventBusStickyTest extends TestBase {
         eventBus.postSticky(123);
 
         List<String> stringEvents = eventBus.stickyEvents(String.class);
-        assertEquals(2, stringEvents.size());
-        assertTrue(stringEvents.contains("hello"));
-        assertTrue(stringEvents.contains("world"));
+        assertHaveSameElements(List.of("hello", "world"), stringEvents);
 
         List<Integer> intEvents = eventBus.stickyEvents(Integer.class);
         assertEquals(List.of(123), intEvents);
@@ -283,9 +279,33 @@ public class EventBusStickyTest extends TestBase {
 
     @Test
     void stickyEvents_whenIdIsUnknown_returnsEmptySnapshot() {
-        List<String> events = eventBus.stickyEvents("nonExistent", String.class);
-        assertNotNull(events);
-        assertTrue(events.isEmpty());
+        eventBus.postSticky("existing", "retained");
+
+        assertTrue(eventBus.stickyEvents("missing", String.class).isEmpty());
+        assertEquals(List.of("retained"), eventBus.stickyEvents("existing", String.class));
+    }
+
+    @ParameterizedTest(name = "explicitId={0}")
+    @ValueSource(booleans = { false, true })
+    void stickyEvents_whenSnapshotOrStoreChanges_keepsThemIndependent(boolean explicitId) {
+        String eventId = explicitId ? "named" : null;
+        String first = new String("first");
+        String second = new String("second");
+        eventBus.postSticky(eventId, first);
+        List<String> snapshot = explicitId ? eventBus.stickyEvents(eventId, String.class) : eventBus.stickyEvents(String.class);
+
+        eventBus.postSticky(eventId, second);
+
+        assertEquals(1, snapshot.size());
+        assertSame(first, snapshot.get(0), "Adding retained events must not update an earlier snapshot");
+        snapshot.clear();
+        List<String> current = explicitId ? eventBus.stickyEvents(eventId, String.class) : eventBus.stickyEvents(String.class);
+        assertHaveSameElements(List.of(first, second), current);
+        assertTrue(eventBus.removeStickyEvent(eventId, first));
+        assertHaveSameElements(List.of(first, second), current);
+        List<String> remaining = eventBus.stickyEvents(eventId, String.class);
+        assertEquals(1, remaining.size());
+        assertSame(second, remaining.get(0));
     }
 
     @ParameterizedTest
@@ -301,33 +321,23 @@ public class EventBusStickyTest extends TestBase {
         assertThrows(IllegalArgumentException.class, () -> eventBus.removeStickyEvents("id", null));
     }
 
-    @Test
-    void removeStickyEvent_whenEventIsRetained_removesItOnce() {
-        String event = "sticky";
-        eventBus.postSticky(event);
-        assertTrue(eventBus.removeStickyEvent(event));
-        assertFalse(eventBus.removeStickyEvent(event)); // Already removed
-    }
+    @ParameterizedTest(name = "explicitId={0}")
+    @ValueSource(booleans = { false, true })
+    void removeStickyEvent_whenEventIsRetained_matchesIdentityAndChannelAndRemovesOnce(boolean explicitId) {
+        String event = new String("retained");
+        String eventId = explicitId ? "named" : null;
+        if (explicitId) {
+            eventBus.postSticky(eventId, event);
+        } else {
+            eventBus.postSticky(event);
+        }
 
-    @Test
-    void removeStickyEvent_whenEventAndIdMatch_removesEvent() {
-        String event = "Sticky Event";
-        eventBus.postSticky("eventId", event);
-
-        boolean removed = eventBus.removeStickyEvent("eventId", event);
-        assertTrue(removed);
-
-        removed = eventBus.removeStickyEvent("wrongId", event);
-        assertFalse(removed);
-    }
-
-    @Test
-    void removeStickyEvent_whenIdDiffers_preservesRetainedEvent() {
-        String event = "sticky";
-        eventBus.postSticky("correctId", event);
-
-        assertFalse(eventBus.removeStickyEvent("wrongId", event));
-        assertTrue(eventBus.removeStickyEvent("correctId", event));
+        assertFalse(eventBus.removeStickyEvent("wrong", event));
+        assertEquals(List.of(event), eventBus.stickyEvents(eventId, String.class));
+        assertTrue(explicitId ? eventBus.removeStickyEvent(eventId, event) : eventBus.removeStickyEvent(event));
+        assertFalse(explicitId ? eventBus.removeStickyEvent(eventId, event) : eventBus.removeStickyEvent(event));
+        assertFalse(eventBus.removeStickyEvent("wrong", event));
+        assertTrue(eventBus.stickyEvents(eventId, String.class).isEmpty());
     }
 
     @Test
@@ -336,30 +346,19 @@ public class EventBusStickyTest extends TestBase {
     }
 
     @Test
-    void removeStickyEvents_whenMultipleEventsMatch_removesAllMatches() {
-        eventBus.postSticky("eventId", "test1");
-        eventBus.postSticky("eventId", "test2");
-
-        assertTrue(eventBus.removeStickyEvents("eventId", String.class));
-        List<?> events = eventBus.stickyEvents("eventId", String.class);
-        assertEquals(0, events.size());
-    }
-
-    @Test
-    void removeStickyEvents_whenIdAndTypeMatch_preservesOtherChannelsAndTypes() {
-        eventBus.postSticky("id1", "Event 1");
-        eventBus.postSticky("id2", "Event 2");
+    void removeStickyEvents_whenIdAndTypeMatch_removesAllMatchesAndPreservesOthers() {
+        eventBus.postSticky("id1", "first");
+        eventBus.postSticky("id1", "second");
+        eventBus.postSticky("id2", "other channel");
         eventBus.postSticky("id1", 123);
+        assertHaveSameElements(List.of("first", "second"), eventBus.stickyEvents("id1", String.class));
 
-        boolean removed = eventBus.removeStickyEvents("id1", String.class);
-        assertTrue(removed);
+        assertTrue(eventBus.removeStickyEvents("id1", String.class));
 
-        List<?> remaining = eventBus.stickyEvents("id1", String.class);
-        assertEquals(0, remaining.size());
+        assertTrue(eventBus.stickyEvents("id1", String.class).isEmpty());
+        assertFalse(eventBus.removeStickyEvents("id1", String.class));
         assertEquals(List.of(123), eventBus.stickyEvents("id1", Integer.class));
-
-        remaining = eventBus.stickyEvents("id2", String.class);
-        assertEquals(List.of("Event 2"), remaining);
+        assertEquals(List.of("other channel"), eventBus.stickyEvents("id2", String.class));
     }
 
     @Test
@@ -413,25 +412,21 @@ public class EventBusStickyTest extends TestBase {
     }
 
     @Test
-    void removeAllStickyEvents_whenEventsAreRetained_clearsEveryType() {
-        eventBus.postSticky("Event 1");
-        eventBus.postSticky("Event 2");
-        eventBus.postSticky(123);
+    void removeAllStickyEvents_whenEventsAreRetained_clearsEveryChannelAndTypeAndRemainsIdempotent() {
+        assertFalse(eventBus.removeAllStickyEvents());
+        assertTrue(eventBus.stickyEvents(Object.class).isEmpty());
+        eventBus.postSticky("first").postSticky("second").postSticky(123);
+        eventBus.postSticky("named", "other channel");
 
         assertTrue(eventBus.removeAllStickyEvents());
 
-        assertEquals(0, eventBus.stickyEvents(String.class).size());
-        assertEquals(0, eventBus.stickyEvents(Integer.class).size());
-    }
-
-    @Test
-    void removeAllStickyEvents_whenBusIsEmpty_returnsFalse() {
-        // Should not throw on empty bus and should report that nothing was removed.
+        assertTrue(eventBus.stickyEvents(String.class).isEmpty());
+        assertTrue(eventBus.stickyEvents(Integer.class).isEmpty());
+        assertTrue(eventBus.stickyEvents("named", String.class).isEmpty());
         assertFalse(eventBus.removeAllStickyEvents());
-        assertTrue(eventBus.stickyEvents(Object.class).isEmpty());
     }
 
-    public static class TestStickySubscriber {
+    public static class StickyStringSubscriber {
         final List<String> receivedEvents = new ArrayList<>();
 
         @Subscribe(sticky = true)
@@ -440,7 +435,7 @@ public class EventBusStickyTest extends TestBase {
         }
     }
 
-    public static class TestSubscriber {
+    public static class StringSubscriber {
         final List<String> receivedEvents = new ArrayList<>();
 
         @Subscribe

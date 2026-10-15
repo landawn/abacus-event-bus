@@ -4,6 +4,7 @@ Run the full suite with `mvn clean test`. Generate coverage with
 `mvn clean test jacoco:report`; the report is in `target/site/jacoco/index.html`.
 Run the explicit suite with `mvn -Dtest=AbacusEventBusTestSuite test`.
 Maven supplies the JVM module options needed by the shutdown-hook tests.
+The cleanup plan and scenario consolidation record are in [TEST_CLEANUP_PLAN.md](TEST_CLEANUP_PLAN.md).
 The explicit suite is an alternative entry point; do not select it together with
 all individual test classes in the same invocation.
 
@@ -20,7 +21,8 @@ different contracts.
 | `EventBusRoutingTest` | Synchronous delivery, event IDs, type hierarchy, strict matching, payload identity, and subscriber failure isolation |
 | `EventBusFilteringTest` | Synchronous deduplication and interval behavior |
 | `EventBusStickyTest` | Sticky replay, event identity, retained channels, queries, and removal |
-| `EventBusAsyncDispatchTest` | Queued dispatch, filtering before execution, queued delivery after unregistration, executor failures, and rollback |
+| `EventBusAsyncDispatchTest` | Public asynchronous posting, filtering before execution, sticky delivery, unregistration, and failure recovery |
+| `EventBusReservationTest` | Protected dispatch, reservation commit/release, failure history, throwable identity, and deterministic completion races |
 | `EventBusExecutorContractTest` | Executor selection, thread modes, worker properties, shutdown hooks, and executor lifetime |
 | `EventBusConcurrencyTest` | Concurrent registration, sticky delivery, reentrancy, deduplication, and deadlock regressions |
 | `EventBusLookupCacheTest` | Cache invalidation, event-ID retention, and concurrent delivery |
@@ -38,12 +40,13 @@ different contracts.
   depends on their visibility. Class-loader fixtures also retain public classes and
   constructors.
 - Group source by API operation or behavior, keeping related overloads together.
-  Put ordinary cases before boundaries and failures, and helpers/fixtures after tests.
+  Put ordinary cases before boundaries and failures, fixtures after tests, and helpers/providers last.
   Source order is for readers: tests must not depend on execution order or `@Order`.
 - Keep subscriber fixtures local to their owning class. Use a fresh bus for each
   test; clean up default-singleton registrations in `finally`.
 - Use parameterized tests for equivalent cases that differ only in data, such as
-  null/empty IDs or lambda/annotated subscriber forms. Preserve distinct regression
+  null/empty IDs or lambda/annotated subscriber forms. Use named enum/method sources
+  for overload and callback matrices so every reported case identifies its variant. Preserve distinct regression
   interleavings and distinct overloads instead of merging their assertions away.
 - Assert complete delivered values, identity where contractual, and exact counts.
   Sticky replay and subscriber-query ordering are unspecified; compare contents
@@ -60,8 +63,8 @@ must reach the JUnit thread; waits and joins must be bounded. A subscriber callb
 can swallow assertion failures through EventBus's exception handling, so record
 observations and assert them on the test thread.
 
-Use `TestBase.runConcurrently` for start-barrier races and
-`shutdownAndAwaitTermination` for test-owned executors. Interval expiry checks
+Use `TestBase.runConcurrently` for start-barrier races, `awaitBlocked` to coordinate
+monitor interleavings, and `shutdownAndAwaitTermination` for test-owned executors. Interval expiry checks
 wait only for a minimum interval; exact boundaries use synthetic timestamps.
 GC regression tests use a bounded collection wait and require a JVM permitting
 explicit GC.
@@ -70,7 +73,9 @@ Tests that change the EventBus logger share the `eventbus-logger` resource lock
 and restore its configuration. Executor-service lifecycle tests live in
 `EventBusExecutorContractTest` and share the `eventbus-shutdown-hooks` lock.
 Shutdown checks invoke the hook body while executors are strongly reachable and
-verify failure isolation and interrupt preservation. A separate, bounded child JVM
+verify failure isolation and interrupt preservation. Hook-count assertions explicitly
+initialize the shared EventBus runtime before measuring per-factory additions, so
+they also work when selected alone in a fresh JVM. A separate, bounded child JVM
 initializes EventBus inside a real shutdown hook to check its fallback executor.
 The child initializes the common utility dependency before shutdown, inherits the
 JaCoCo agent when present, and explicitly dumps coverage after the hook assertions.
@@ -78,10 +83,11 @@ This keeps shutdown coverage independent of GC timing and agent-hook ordering.
 
 ## Coverage
 
-The 2026-10-15 clean coverage run contains 220 passing test invocations with
+The 2026-10-15 clean coverage run contains 222 passing test invocations across 163 test methods with
 abacus-common 8.2.0. Standard discovery passes on Java 25; the explicit suite also
 passes on Java 21 with randomized class/method order (seed 15102026), selecting the
-same 220 cases without duplicates.
+same 222 cases without duplicates.
+The cleanup preserves all baseline covered instructions and branch counts on every source line.
 
 | Measure | Covered / total | Coverage |
 | --- | --- | --- |
@@ -121,6 +127,13 @@ reflection states or removing defensive branches for the metric.
 | Lambda event-ID validation in three classes | Missing/null/empty IDs and successful named registration in `EventBusRegistrationTest` |
 | Async thread checks across four classes | Annotated/lambda default workers, custom executor selection, inline execution, and mode overrides in `EventBusExecutorContractTest` |
 | Null type validation spanning subscriber and sticky APIs | Empty/populated cases in each query owner's class |
+| Repeated registration bodies | Named cases for all four annotated overloads and six callback-form/mode combinations |
+| Separate successful removal and idempotency tests | Annotated/lambda cases assert delivery stops, both removals return the bus, and both registry views are empty |
+| Annotated/lambda broadcast and failure-isolation bodies | One parameterized contract per behavior, preserving both subscriber forms |
+| Overlapping sticky removals | Multi-event, wrong-ID, repeated-removal, cross-channel, and cross-type assertions in their retained owner |
+| Query snapshot/empty checks | All, unqualified, and named subscriber queries; both sticky-query overloads also verify snapshot independence |
+| Reservation cases embedded in asynchronous API tests | Dedicated EventBusReservationTest; all nine internal regression methods preserved |
+| Custom cross-post workers and duplicate monitor waits | Shared bounded TestBase helpers with failure propagation |
 
 When removing another duplicate, identify the retained scenario and preserve every
 unique assertion or parameter case. Shared setup alone does not make tests duplicates.
