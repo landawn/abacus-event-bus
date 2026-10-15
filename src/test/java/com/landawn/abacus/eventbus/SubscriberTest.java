@@ -49,7 +49,7 @@ public class SubscriberTest extends TestBase {
     private static Stream<Arguments> implementations() {
         return Stream.of(Arguments.of("lambda", (Function<List<String>, Subscriber<String>>) events -> value -> events.add(value)),
                 Arguments.of("method reference", (Function<List<String>, Subscriber<String>>) events -> events::add),
-                Arguments.of("anonymous class", (Function<List<String>, Subscriber<String>>) events -> new Subscriber<String>() {
+                Arguments.of("anonymous class", (Function<List<String>, Subscriber<String>>) events -> new Subscriber<>() {
                     @Override
                     public void on(String event) {
                         events.add(event);

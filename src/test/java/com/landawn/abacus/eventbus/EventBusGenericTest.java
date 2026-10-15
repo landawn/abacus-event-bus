@@ -491,8 +491,8 @@ public class EventBusGenericTest extends TestBase {
     }
 
     private static Stream<Arguments> wildcardOwnerSubscribers() {
-        return Stream.of(Arguments.of(new UpperBoundOwnerHandler(new Owner<String>()), List.of("text")),
-                Arguments.of(new LowerBoundOwnerHandler(new Owner<Object>()), List.of("text", 42)),
+        return Stream.of(Arguments.of(new UpperBoundOwnerHandler(new Owner<>()), List.of("text")),
+                Arguments.of(new LowerBoundOwnerHandler(new Owner<>()), List.of("text", 42)),
                 Arguments.of(new UnboundedOwnerHandler(new Owner<>()), List.of("text", 42)));
     }
 }
