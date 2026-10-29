@@ -2,21 +2,36 @@ package com.landawn.abacus.eventbus;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.File;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.jar.JarEntry;
+import java.util.jar.JarOutputStream;
 import java.util.stream.Stream;
+
+import javax.tools.JavaCompiler;
+import javax.tools.ToolProvider;
 
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import com.landawn.abacus.TestBase;
+import com.landawn.abacus.util.ClassUtil;
 
 @Tag("unit")
 public class EventBusGenericTest extends TestBase {
@@ -231,6 +246,108 @@ public class EventBusGenericTest extends TestBase {
         bus.post("\u03bb");
         bus.post(1);
         assertEquals(List.of("\u03bb"), handler.values);
+    }
+
+    @Test
+    void register_whenRawSubclassOverridesGenericHandler_deliversOnce() {
+        final EventBus bus = EventBus.create();
+        final RawOverride handler = new RawOverride();
+        bus.register(handler);
+        bus.post("text");
+        assertEquals(List.of("override:text"), handler.values);
+    }
+
+    @Test
+    void register_whenRawSubclassOverrideIsAnnotated_usesOverrideMetadata() {
+        final EventBus bus = EventBus.create();
+        final RawAnnotatedOverride handler = new RawAnnotatedOverride();
+        bus.register(handler);
+        bus.post("unqualified");
+        bus.post("override", "qualified");
+        assertEquals(List.of("override:qualified"), handler.values);
+        assertTrue(bus.subscribers(String.class).isEmpty());
+    }
+
+    @Test
+    void register_whenRawSubclassAnnotatesSubscriberContract_usesOverrideMetadata() {
+        final EventBus bus = EventBus.create();
+        final RawSubscriberOverride handler = new RawSubscriberOverride();
+        bus.register(handler);
+        bus.post("unqualified");
+        bus.post("override", "qualified");
+        assertEquals(List.of("override:qualified"), handler.values);
+        assertTrue(bus.subscribers(String.class).isEmpty());
+    }
+
+    @Test
+    void register_whenLambdaTargetsSubinterfaceFixingType_filtersByThatType() {
+        final EventBus bus = EventBus.create();
+        final List<String> received = new ArrayList<>();
+        final StringSubscriber subscriber = received::add;
+
+        bus.register(subscriber); // the fixed type argument makes an event ID unnecessary
+        bus.post("text");
+        bus.post(42);
+
+        assertEquals(List.of("text"), received);
+        assertEquals(List.of(subscriber), bus.subscribers(String.class));
+        assertTrue(bus.subscribers(Integer.class).isEmpty());
+    }
+
+    @ParameterizedTest(name = "opensTo={0}")
+    @ValueSource(strings = { "abacus.event.bus", "abacus.common" })
+    void register_whenNamedModuleOpensHandlerPackageToLibrary_deliversEvent(String opensTo, @TempDir Path directory) throws Exception {
+        // EventBus and abacus-common become separate automatic modules; the app opens its package to one of them only.
+        // Opening it to abacus.common is what the ClassUtil.setAccessible fallback keeps working.
+        final JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+        assertNotNull(compiler, "This test requires a JDK");
+        final Path modules = Files.createDirectories(directory.resolve("modules"));
+        final Path eventBusClasses = Path.of(EventBus.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+        try (OutputStream out = Files.newOutputStream(modules.resolve("abacus-event-bus.jar"));
+             JarOutputStream jar = new JarOutputStream(out);
+             Stream<Path> files = Files.walk(eventBusClasses)) {
+            for (final Path file : (Iterable<Path>) files.filter(p -> p.toString().endsWith(".class"))::iterator) {
+                jar.putNextEntry(new JarEntry(eventBusClasses.relativize(file).toString().replace('\\', '/')));
+                jar.write(Files.readAllBytes(file));
+                jar.closeEntry();
+            }
+        }
+        Files.copy(Path.of(ClassUtil.class.getProtectionDomain().getCodeSource().getLocation().toURI()), modules.resolve("abacus-common.jar"));
+
+        final Path source = Files.createDirectories(directory.resolve("src/app/handlers"));
+        Files.writeString(directory.resolve("src/module-info.java"), "module app { requires abacus.event.bus; opens app.handlers to " + opensTo + "; }");
+        Files.writeString(source.resolve("Main.java"), """
+                package app.handlers;
+                public class Main {
+                    public static void main(String[] args) {
+                        StringBuilder seen = new StringBuilder();
+                        Object handler = new Object() {
+                            @com.landawn.abacus.eventbus.Subscribe
+                            public void on(String event) { seen.append(event); }
+                        };
+                        com.landawn.abacus.eventbus.EventBus.create().register(handler).post("delivered");
+                        System.out.print("RESULT=" + seen);
+                    }
+                }
+                """);
+        final Path classes = directory.resolve("classes");
+        assertEquals(0, compiler.run(null, null, null, "-nowarn", "-d", classes.toString(), "--module-path", modules.toString(),
+                directory.resolve("src/module-info.java").toString(), source.resolve("Main.java").toString()));
+
+        final Path output = directory.resolve("output.txt");
+        // ALL-SYSTEM: abacus-common, as an automatic module, needs modules such as java.sql resolved.
+        final Process process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(), "--add-modules", "ALL-SYSTEM",
+                "--module-path", modules + File.pathSeparator + classes, "-m", "app/app.handlers.Main").redirectErrorStream(true)
+                        .redirectOutput(output.toFile())
+                        .start();
+        try {
+            assertTrue(process.waitFor(30, TimeUnit.SECONDS), "Child JVM did not finish");
+        } finally {
+            process.destroyForcibly();
+        }
+        final String text = Files.readString(output, StandardCharsets.UTF_8);
+        assertTrue(text.contains("RESULT=delivered"), text);
+        assertEquals(0, process.exitValue(), text);
     }
 
     public interface DiamondRoot<T> {
@@ -487,6 +604,60 @@ public class EventBusGenericTest extends TestBase {
         @Subscribe
         public void onEvent(String event) {
             receivedEvents.add(event);
+        }
+    }
+
+    public interface StringSubscriber extends Subscriber<String> {
+    }
+
+    public static class GenericHandlerBase<T> {
+        final List<String> values = new ArrayList<>();
+
+        @Subscribe
+        public void handle(T event) {
+            values.add("base:" + event);
+        }
+    }
+
+    public static class StringHandlerMiddle<X> extends GenericHandlerBase<String> {
+    }
+
+    @SuppressWarnings("rawtypes")
+    public static class RawOverride extends StringHandlerMiddle {
+        @Override
+        @Subscribe
+        public void handle(Object event) {
+            values.add("override:" + event);
+        }
+    }
+
+    @SuppressWarnings("rawtypes")
+    public static class RawAnnotatedOverride extends StringHandlerMiddle {
+        @Override
+        @Subscribe(eventId = "override")
+        public void handle(Object event) {
+            values.add("override:" + event);
+        }
+    }
+
+    public static class GenericSubscriberBase<T> implements Subscriber<T> {
+        final List<String> values = new ArrayList<>();
+
+        @Override
+        public void on(T event) {
+            values.add("base:" + event);
+        }
+    }
+
+    public static class StringSubscriberMiddle<X> extends GenericSubscriberBase<String> {
+    }
+
+    @SuppressWarnings("rawtypes")
+    public static class RawSubscriberOverride extends StringSubscriberMiddle {
+        @Override
+        @Subscribe(eventId = "override")
+        public void on(Object event) {
+            values.add("override:" + event);
         }
     }
 

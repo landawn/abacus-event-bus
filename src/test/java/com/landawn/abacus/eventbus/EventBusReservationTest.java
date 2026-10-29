@@ -135,6 +135,8 @@ public class EventBusReservationTest extends TestBase {
         final EventBus.SubIdentifier identifier = asyncIdentifier(subscriber);
         final EventBus bus = EventBus.create("newer-accepted-before-failure", task -> {
             if (offered.getAndIncrement() == 0) {
+                // "newer" commits inline, which cuts the reservation chain, so releasing "older" afterwards takes the
+                // branch of SubIdentifier.release where the rejected reservation is no longer reachable.
                 busReference.get().dispatch(identifier, "newer");
                 throwExecutorFailure(expected);
             }
@@ -274,6 +276,75 @@ public class EventBusReservationTest extends TestBase {
         assertTrue(committed.getBoolean(retry));
     }
 
+    @Test
+    void dispatch_whenFailedSubmissionRunsLater_skipsCallbackAndKeepsDeduplication() throws Exception {
+        final List<Runnable> queued = new ArrayList<>();
+        final AtomicInteger offered = new AtomicInteger();
+        final RejectedExecutionException rejection = new RejectedExecutionException("queued, then reported failure");
+        final EventBus bus = EventBus.create("late-failed-submission", task -> {
+            queued.add(task);
+            if (offered.getAndIncrement() == 0) {
+                throw rejection;
+            }
+        });
+        final DeduplicatedHandler subscriber = new DeduplicatedHandler();
+        final EventBus.SubIdentifier identifier = asyncIdentifier(subscriber);
+
+        assertSame(rejection, assertThrows(RejectedExecutionException.class, () -> bus.dispatch(identifier, "same")));
+        bus.dispatch(identifier, "same");
+        assertEquals(2, offered.get(), "the released reservation must not deduplicate the retry");
+
+        queued.forEach(Runnable::run);
+
+        assertEquals(List.of("same"), subscriber.received, "a submission whose reservation was released must not also be delivered");
+    }
+
+    @Test
+    void dispatch_whenUnfilteredFailedSubmissionRunsLater_stillDeliversEvent() throws Exception {
+        final List<Runnable> queued = new ArrayList<>();
+        final RejectedExecutionException rejection = new RejectedExecutionException("queued, then reported failure");
+        final EventBus bus = EventBus.create("late-unfiltered-submission", task -> {
+            queued.add(task);
+            throw rejection;
+        });
+        final UnfilteredHandler subscriber = new UnfilteredHandler();
+        final EventBus.SubIdentifier identifier = asyncIdentifier(subscriber);
+
+        assertSame(rejection, assertThrows(RejectedExecutionException.class, () -> bus.dispatch(identifier, "late")));
+        queued.forEach(Runnable::run);
+
+        // Without throttling or deduplication there is no reservation, so no filter state for the late task to bypass.
+        assertEquals(List.of("late"), subscriber.received);
+    }
+
+    @Test
+    void release_whenOlderSubmissionsFailWhileNewerArePending_doesNotRetainRejectedHistory() throws Exception {
+        final EventBus.SubIdentifier identifier = asyncIdentifier(new DeduplicatedHandler());
+        final Method reserve = EventBus.SubIdentifier.class.getDeclaredMethod("reservePost", Object.class);
+        reserve.setAccessible(true);
+        final Method release = EventBus.SubIdentifier.class.getDeclaredMethod("release", reserve.getReturnType());
+        final java.lang.reflect.Field current = EventBus.SubIdentifier.class.getDeclaredField("currentReservation");
+        final java.lang.reflect.Field previous = reserve.getReturnType().getDeclaredField("previous");
+        current.setAccessible(true);
+        previous.setAccessible(true);
+
+        Object older = reserve.invoke(identifier, "event-0");
+        for (int i = 1; i <= 64; i++) {
+            final Object newer = reserve.invoke(identifier, "event-" + i);
+            release.invoke(identifier, older);
+            older = newer;
+        }
+
+        final Object pending = current.get(identifier);
+        assertSame(older, pending);
+        assertNull(previous.get(pending), "a rejected predecessor must not stay linked behind a pending submission");
+        assertEquals("event-64", identifier.previousEvent);
+
+        release.invoke(identifier, pending);
+        assertNull(current.get(identifier));
+        assertNull(identifier.previousEvent);
+    }
+
     public static class ThrottledHandler {
         final List<String> received = Collections.synchronizedList(new ArrayList<>());
 
@@ -287,6 +358,15 @@ public class EventBusReservationTest extends TestBase {
         final List<String> received = Collections.synchronizedList(new ArrayList<>());
 
         @Subscribe(threadMode = ThreadMode.THREAD_POOL_EXECUTOR, deduplicate = true)
+        public void onEvent(String event) {
+            received.add(event);
+        }
+    }
+
+    public static class UnfilteredHandler {
+        final List<String> received = Collections.synchronizedList(new ArrayList<>());
+
+        @Subscribe(threadMode = ThreadMode.THREAD_POOL_EXECUTOR)
         public void onEvent(String event) {
             received.add(event);
         }

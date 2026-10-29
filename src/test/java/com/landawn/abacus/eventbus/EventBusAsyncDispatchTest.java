@@ -13,6 +13,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -268,6 +269,26 @@ public class EventBusAsyncDispatchTest extends TestBase {
         assertEquals(2, queued.size(), "Sticky replay and one distinct live event should be queued");
         queued.forEach(Runnable::run);
         assertEquals(List.of("retained", "next"), received);
+    }
+
+    @Test
+    void register_whenDirectExecutorReplaysAsyncSticky_runsOnRegisteringThreadBeforeReturning() {
+        EventBus eventBus = EventBus.create("inline-sticky", Runnable::run);
+        Thread registeringThread = Thread.currentThread();
+        AtomicBoolean registerReturned = new AtomicBoolean();
+        List<String> observations = new ArrayList<>();
+        class Handler {
+            @Subscribe(threadMode = ThreadMode.THREAD_POOL_EXECUTOR, sticky = true)
+            public void onEvent(String event) {
+                observations.add(event + ":registeringThread=" + (Thread.currentThread() == registeringThread) + ":afterRegister=" + registerReturned.get());
+            }
+        }
+        eventBus.postSticky("retained");
+
+        eventBus.register(new Handler());
+        registerReturned.set(true);
+
+        assertEquals(List.of("retained:registeringThread=true:afterRegister=false"), observations);
     }
 
     @Test

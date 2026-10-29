@@ -58,6 +58,25 @@ public class EventBusStickyTest extends TestBase {
     }
 
     @Test
+    void register_whenStickyReplayIsThrottled_replaysOnlyFirstRetainedEvent() {
+        List<String> stickyEvents = new ArrayList<>();
+        Object sticky = new Object() {
+            @Subscribe(sticky = true, intervalMillis = 60_000)
+            public void on(String event) {
+                stickyEvents.add(event);
+            }
+        };
+        eventBus.postSticky("first").postSticky("second");
+
+        eventBus.register(sticky);
+        eventBus.post("live");
+
+        // Replay order is unspecified; the interval admits exactly one replay and then suppresses the live post.
+        assertEquals(1, stickyEvents.size(), "Replay must pass through interval throttling: " + stickyEvents);
+        assertTrue(List.of("first", "second").contains(stickyEvents.get(0)), stickyEvents.toString());
+    }
+
+    @Test
     void register_whenOnlySomeHandlersAreSticky_replaysOnlyToThoseHandlers() {
         List<String> stickyEvents = new ArrayList<>();
         List<String> liveEvents = new ArrayList<>();
@@ -268,6 +287,33 @@ public class EventBusStickyTest extends TestBase {
         // SubSubEvent should not match
         List<SubSubEvent> subSubEvents = eventBus.stickyEvents(SubSubEvent.class);
         assertTrue(subSubEvents.isEmpty());
+    }
+
+    @Test
+    void stickyEvents_whenTypeIsPrimitive_matchesBoxedEvents() {
+        Integer boxed = 1234567;
+        eventBus.postSticky(boxed);
+        eventBus.postSticky("named", 7);
+
+        List<Integer> unqualified = eventBus.stickyEvents(int.class);
+        assertEquals(1, unqualified.size());
+        assertSame(boxed, unqualified.get(0));
+        assertEquals(List.of(7), eventBus.stickyEvents("named", int.class));
+        assertTrue(eventBus.stickyEvents(long.class).isEmpty());
+    }
+
+    @Test
+    void removeStickyEvents_whenTypeIsPrimitive_removesBoxedEvents() {
+        eventBus.postSticky(1).postSticky("named", 2).postSticky("text");
+
+        assertFalse(eventBus.removeStickyEvents(long.class));
+        assertTrue(eventBus.removeStickyEvents(int.class));
+
+        assertTrue(eventBus.stickyEvents(Integer.class).isEmpty());
+        assertEquals(List.of(2), eventBus.stickyEvents("named", Integer.class));
+        assertEquals(List.of("text"), eventBus.stickyEvents(String.class));
+        assertTrue(eventBus.removeStickyEvents("named", int.class));
+        assertTrue(eventBus.stickyEvents("named", Integer.class).isEmpty());
     }
 
     @Test

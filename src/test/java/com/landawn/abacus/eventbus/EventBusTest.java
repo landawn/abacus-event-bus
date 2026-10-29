@@ -139,6 +139,32 @@ public class EventBusTest extends TestBase {
         assertEquals(List.of(subscriber), eventBus.subscribers(eventId, String.class));
     }
 
+    @Test
+    void subscriberQueries_whenTypeIsPrimitive_matchHandlersByBoxedType() {
+        Object intHandler = new Object() {
+            @Subscribe
+            public void onInt(int value) {
+            }
+        };
+        Object numberHandler = new Object() {
+            @Subscribe(eventId = "numbers")
+            public void onNumber(Number value) {
+            }
+        };
+        Object strictInt = new Object() {
+            @Subscribe(eventId = "strict", strictEventType = true)
+            public void onInt(int value) {
+            }
+        };
+        eventBus.register(intHandler).register(numberHandler).register(strictInt);
+
+        assertTrue(eventBus.hasSubscribers(int.class));
+        assertEquals(List.of(intHandler), eventBus.subscribers(int.class));
+        assertEquals(List.of(numberHandler), eventBus.subscribers("numbers", int.class));
+        assertEquals(List.of(strictInt), eventBus.subscribers("strict", int.class));
+        assertFalse(eventBus.hasSubscribers(boolean.class));
+    }
+
     @ParameterizedTest(name = "query={0}")
     @EnumSource(SubscriberQuery.class)
     void subscriberQueries_whenBusIsEmpty_returnEmptySnapshots(SubscriberQuery query) {

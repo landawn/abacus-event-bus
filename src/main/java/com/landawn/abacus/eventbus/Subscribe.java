@@ -41,9 +41,11 @@ import com.landawn.abacus.util.ThreadMode;
  * <p><b>Annotation-only advanced features:</b> The {@link #sticky()}, {@link #strictEventType()},
  * {@link #intervalMillis()} (throttling) and {@link #deduplicate()} knobs can be configured
  * <em>only</em> through this annotation. The {@code EventBus.register(...)} methods accept
- * registration-time overrides for the event ID and thread mode only, so a lambda /
- * {@link Subscriber} registration (which has no annotated method) cannot use any of these four
- * features. Annotate a subscriber method with {@code @Subscribe} to opt into them.</p>
+ * registration-time overrides for the event ID and thread mode only, so a {@link Subscriber}
+ * registration whose {@code on(...)} method carries no {@code @Subscribe} annotation (for example a
+ * plain lambda or method reference) cannot use any of these four features. Annotate a subscriber method
+ * with {@code @Subscribe} to opt into them; a {@code Subscriber} implementation may annotate its own
+ * {@code on(...)} method.</p>
  *
  * <p><b>Usage Examples:</b></p>
  * <pre>{@code
@@ -62,9 +64,10 @@ import com.landawn.abacus.util.ThreadMode;
  *         deduplicate = true
  *     )
  *     public void onCriticalEvent(CriticalEvent event) {
- *         // Runs on background thread, receives only exact CriticalEvent type,
- *         // picks up sticky events on registration, throttled to 1 per second,
- *         // and ignores consecutive duplicate events.
+ *         // Receives only CriticalEvent instances (not subtypes) posted with the "criticalEvents" ID,
+ *         // on the bus executor (a background thread by default), replays matching retained sticky
+ *         // events on registration, accepts at most one event per second, and skips an event equal to
+ *         // the previously accepted one (both filters also apply to sticky replays).
  *     }
  * }
  * }</pre>
@@ -79,19 +82,24 @@ public @interface Subscribe {
 
     /**
      * Specifies the thread mode for event delivery.
-     * This determines on which thread the subscriber method will be called.
+     * This determines on which thread the subscriber method will be called. A non-{@code null} thread mode
+     * passed to {@code EventBus.register(...)} replaces this value for every handler of that registration.
      *
      * <p>Available options:</p>
      * <ul>
-     *   <li>{@link ThreadMode#DEFAULT} - Events are delivered on the same thread that posts them (default)</li>
-     *   <li>{@link ThreadMode#THREAD_POOL_EXECUTOR} - Events are delivered on a background thread from a thread pool</li>
+     *   <li>{@link ThreadMode#DEFAULT} - Events are delivered synchronously on the thread that posts them; a
+     *       sticky replay runs on the thread that calls {@code register} (default)</li>
+     *   <li>{@link ThreadMode#THREAD_POOL_EXECUTOR} - Events are handed to the bus's executor: a pool of
+     *       background threads for the default executor, or whatever thread a custom executor supplied to
+     *       {@link EventBus#create(String, java.util.concurrent.Executor)} chooses (a direct executor runs the
+     *       callback on the posting thread)</li>
      * </ul>
      *
      * <p><b>Usage Examples:</b></p>
      * <pre>{@code
      * @Subscribe(threadMode = ThreadMode.THREAD_POOL_EXECUTOR)
      * public void onHeavyEvent(DataEvent event) {
-     *     // This will run on a background thread
+     *     // Runs on the bus executor (a background thread with the default executor)
      *     performExpensiveOperation(event.getData());
      * }
      * }</pre>
@@ -104,7 +112,9 @@ public @interface Subscribe {
      * Controls whether the subscriber accepts only exact event type matches or includes subtypes.
      *
      * <p>When set to {@code true}, only events of the exact parameter type will be delivered.
-     * When {@code false} (default), events of the parameter type and all its subtypes will be delivered.</p>
+     * When {@code false} (default), events of the parameter type and all its subtypes will be delivered.
+     * The strict comparison uses the event's runtime class, so a strict subscriber whose parameter type is an
+     * interface or an abstract class never receives events.</p>
      *
      * <p><b>Usage Examples:</b></p>
      * <pre>{@code
@@ -128,8 +138,13 @@ public @interface Subscribe {
     /**
      * Indicates whether this subscriber should receive previously posted sticky events upon registration.
      *
-     * <p>When {@code true}, every retained sticky event matching this subscriber's type and event ID is
-     * immediately delivered to this subscriber upon registration. When several retained sticky events
+     * <p>When {@code true}, every retained sticky event matching this subscriber's type and effective event ID
+     * is dispatched to this subscriber during registration, in its thread mode. A {@code THREAD_POOL_EXECUTOR}
+     * handler's replay is handed to the bus's executor: with the default executor it runs on a background
+     * thread, but a caller-supplied direct executor runs it on the registering thread before
+     * {@code register} returns. Replayed events pass through the
+     * same {@link #intervalMillis()} and {@link #deduplicate()} filters as posted events, so when either is
+     * enabled some matching retained events may be suppressed. When several retained sticky events
      * match, the order in which they are replayed is unspecified.</p>
      *
      * <p><b>Usage Examples:</b></p>
@@ -153,7 +168,9 @@ public @interface Subscribe {
 
     /**
      * Specifies an event ID to filter incoming events.
-     * Only events posted with the matching event ID will be delivered to this subscriber.
+     * Only events posted with the matching event ID will be delivered to this subscriber. A non-empty event ID
+     * passed to {@code EventBus.register(...)} replaces this value for every handler of that registration: the
+     * handler then receives only events posted with the registration's ID, not those posted with this one.
      *
      * <p>If empty (default) and no registration-level event ID is supplied, the subscriber receives
      * only events posted without an event ID, matched by type.</p>
@@ -209,11 +226,12 @@ public @interface Subscribe {
     /**
      * Controls whether duplicate consecutive events should be ignored.
      *
-     * <p>When {@code true}, if an event equal to the previous event is posted, it will be ignored.
-     * Events are compared using their {@code equals()} method. The comparison is made on the posting
-     * thread at the moment the event is posted, for every {@link #threadMode()}, so "previous" means the
-     * previously <i>posted</i> event, not the one an executor happened to run last; a suppressed
-     * asynchronous duplicate is never handed to the executor.</p>
+     * <p>When {@code true}, an event equal to the event of this subscriber's most recently accepted delivery
+     * attempt is ignored. Events are compared using their {@code equals()} method. The comparison is made on
+     * the posting thread at the moment the event is posted, for every {@link #threadMode()}, so "previous"
+     * follows posting order, not the order in which an executor happened to run callbacks; a suppressed
+     * asynchronous duplicate is never handed to the executor. An event suppressed by
+     * {@link #intervalMillis()} is not accepted, so it never becomes the previous event.</p>
      *
      * <p>The comparison uses the most recently accepted delivery attempt, including one whose callback
      * throws. An asynchronous submission the executor rejects is not one of them: it was never delivered, so

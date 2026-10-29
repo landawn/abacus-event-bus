@@ -23,13 +23,15 @@
  * <ul>
  *   <li>Delivery by event type, including inherited types. Parameterized event types match on their raw class.</li>
  *   <li>Optional event identifiers so a post targets a subset of subscribers.</li>
- *   <li>Sticky events that are retained and replayed to newly registered subscribers.</li>
+ *   <li>Sticky events that are retained and replayed to newly registered {@code @Subscribe(sticky = true)} handlers.</li>
  *   <li>{@link com.landawn.abacus.util.ThreadMode} control for synchronous or executor-based delivery.</li>
- *   <li>Interval throttling, consecutive-event deduplication, sticky delivery, and strict event-type
+ *   <li>Interval throttling, consecutive-event deduplication, sticky replay, and strict event-type
  *       matching &mdash; configured only on {@link Subscribe}, not on lambda {@link Subscriber} registration.</li>
  * </ul>
  *
- * <p>Accepted callbacks may run concurrently when events are posted from multiple threads. Exceptions
+ * <p>Accepted callbacks may run concurrently when events are posted from multiple threads, and
+ * executor-based ({@code THREAD_POOL_EXECUTOR}) callbacks may run concurrently and out of posting order
+ * even when every event is posted from a single thread. Exceptions
  * thrown by a subscriber are caught and logged; they do not abort delivery to other subscribers.</p>
  *
  * @see EventBus

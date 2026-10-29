@@ -67,6 +67,39 @@ public class EventBusDiagnosticsTest extends TestBase {
     }
 
     @Test
+    void post_whenFailedEventDescriptionOverflows_continuesHealthyDelivery() {
+        withLogs(Level.INFO, logs -> {
+            EventBus bus = EventBus.create();
+            Collector healthy = new Collector();
+            bus.register(new FailingHandler(), "cyclic").register(healthy, "cyclic");
+            List<Object> cyclic = new ArrayList<>();
+            cyclic.add(cyclic); // describing a self-containing collection overflows the stack
+
+            assertDoesNotThrow(() -> bus.post("cyclic", cyclic));
+
+            assertEquals(1, healthy.events.size());
+            assertSame(cyclic, healthy.events.get(0));
+            assertTrue(logs.stream().anyMatch(log -> log.getMessage().getFormattedMessage().contains(ArrayList.class.getName() + "@")));
+        });
+    }
+
+    @Test
+    void post_whenDebugEventDescriptionOverflows_stillDeliversEvent() {
+        withLogs(Level.DEBUG, logs -> {
+            EventBus bus = EventBus.create();
+            Collector healthy = new Collector();
+            bus.register(healthy);
+            List<Object> cyclic = new ArrayList<>();
+            cyclic.add(cyclic);
+
+            assertDoesNotThrow(() -> bus.post(cyclic));
+
+            assertEquals(1, healthy.events.size());
+            assertSame(cyclic, healthy.events.get(0));
+        });
+    }
+
+    @Test
     void post_whenSubscriberDescriptionThrows_preservesEmptyAndUnicodeDelivery() {
         withLogs(Level.INFO, logs -> {
             EventBus bus = EventBus.create();

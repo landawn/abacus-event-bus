@@ -20,19 +20,27 @@ package com.landawn.abacus.eventbus;
  * of the specified type.
  *
  * <p>This interface is particularly useful for creating subscribers using lambda expressions
- * or anonymous inner classes. When using lambda expressions, the subscriber must be registered
- * with an event ID to avoid ambiguity.</p>
+ * or anonymous inner classes. The bus matches events against the type argument {@code E} only when the
+ * implementing class reifies it, as an anonymous {@code new Subscriber<Integer>() { ... }}, a named
+ * {@code class X implements Subscriber<Integer>}, or a lambda whose target is a sub-interface that fixes it
+ * ({@code interface IntSubscriber extends Subscriber<Integer>}) does. A lambda expression or method reference
+ * whose target type is {@code Subscriber<E>} itself does not retain {@code E} at runtime, so the bus treats it
+ * as accepting any {@code Object}, like an unannotated
+ * {@code Subscriber<Object>} or unbound generic implementation: it must be registered with a non-empty event
+ * ID (otherwise registration throws {@link IllegalStateException}), and it then receives every event posted
+ * with that ID, whatever its type. Delivering an event that is not an {@code E} to such a subscriber fails;
+ * the {@code EventBus} catches and logs that failure, so post a single payload type per event ID.</p>
  *
  * <p><b>Usage Examples with lambda expression:</b></p>
  * <pre>{@code
  * EventBus eventBus = EventBus.getDefault();
  *
- * // Lambda subscriber for String events
+ * // Lambda subscriber: receives every event posted with "stringEvents"
  * eventBus.register((Subscriber<String>) event -> {
  *     System.out.println("Received: " + event);
  * }, "stringEvents");
  *
- * // Lambda subscriber for custom event types
+ * // Lambda subscriber: receives every event posted with "userEvents"
  * eventBus.register((Subscriber<UserLoginEvent>) event -> {
  *     System.out.println("User logged in: " + event.getUserId());
  * }, "userEvents");
@@ -80,7 +88,9 @@ public interface Subscriber<E> {
      * <p>Implementations should handle the event and should avoid throwing unchecked exceptions.
      * Any exceptions thrown will be caught and logged by the {@code EventBus}.</p>
      *
-     * @param event the event instance posted to the {@code EventBus}; never {@code null}
+     * @param event the event instance posted to the {@code EventBus}; never {@code null} when the
+     *              {@code EventBus} invokes this method, because the bus rejects {@code null} events
+     *              (direct callers are not bound by that guarantee)
      */
     void on(E event);
 }
