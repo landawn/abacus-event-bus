@@ -6,9 +6,6 @@
 
 A lightweight, thread-safe Java event bus for communication between loosely coupled components in the same JVM. Publishers post ordinary Java objects; subscribers receive matching events through annotated methods or the `Subscriber<E>` functional interface.
 
-The library supports synchronous and executor-based delivery, event IDs, type hierarchy matching, sticky events, interval throttling, and consecutive-event deduplication. It builds on [abacus-common](https://github.com/landawn/abacus-common) and requires **Java 21 or later**.
-
-This guide describes the source in this checkout. Dependency versions below match [pom.xml](pom.xml): **abacus-event-bus 1.1** and **abacus-common 8.3.0**. Published Javadoc may describe a different release.
 
 ## Contents
 
@@ -41,11 +38,6 @@ This guide describes the source in this checkout. Dependency versions below matc
         <artifactId>abacus-event-bus</artifactId>
         <version>1.1</version>
     </dependency>
-    <dependency>
-        <groupId>com.landawn.abacus</groupId>
-        <artifactId>abacus-common</artifactId>
-        <version>8.3.0</version>
-    </dependency>
 </dependencies>
 ```
 
@@ -58,7 +50,6 @@ repositories {
 
 dependencies {
     implementation 'com.landawn.abacus:abacus-event-bus:1.1'
-    implementation 'com.landawn.abacus:abacus-common:8.3.0'
 }
 ```
 
