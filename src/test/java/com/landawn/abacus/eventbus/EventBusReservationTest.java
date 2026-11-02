@@ -345,6 +345,34 @@ public class EventBusReservationTest extends TestBase {
         assertNull(identifier.previousEvent);
     }
 
+    @Test
+    void reservePost_whenEqualityMovesAcceptedTimeIntoInterval_suppressesEvent() throws Exception {
+        IntervalDedupHandler subscriber = new IntervalDedupHandler();
+        EventBus.SubIdentifier prototype = new EventBus.SubIdentifier(IntervalDedupHandler.class.getMethod("onEvent", Object.class));
+        EventBus.SubIdentifier identifier = new EventBus.SubIdentifier(prototype, subscriber, null, ThreadMode.DEFAULT);
+        Method reserve = EventBus.SubIdentifier.class.getDeclaredMethod("reservePost", Object.class);
+        reserve.setAccessible(true);
+        Class<?> reservationType = reserve.getReturnType();
+        java.lang.reflect.Field accepted = reservationType.getDeclaredField("accepted");
+        java.lang.reflect.Field interval = reservationType.getDeclaredField("INTERVAL");
+        accepted.setAccessible(true);
+        interval.setAccessible(true);
+
+        RetimingEvent first = new RetimingEvent(identifier);
+        Object acceptedReservation = reserve.invoke(identifier, first);
+        assertTrue(accepted.getBoolean(acceptedReservation));
+        assertSame(first, identifier.previousEvent);
+
+        // The first check must see an expired interval. equals() then moves the accepted timestamp to now,
+        // which is what the recheck after equality is there to notice.
+        identifier.recordPostTime(System.nanoTime() - TimeUnit.SECONDS.toNanos(120));
+        Object suppressed = reserve.invoke(identifier, new RetimingEvent(identifier));
+
+        assertSame(interval.get(null), suppressed);
+        assertFalse(accepted.getBoolean(suppressed));
+        assertSame(first, identifier.previousEvent, "A suppressed event must not replace the accepted one");
+    }
+
     public static class ThrottledHandler {
         final List<String> received = Collections.synchronizedList(new ArrayList<>());
 
@@ -360,6 +388,34 @@ public class EventBusReservationTest extends TestBase {
         @Subscribe(threadMode = ThreadMode.THREAD_POOL_EXECUTOR, deduplicate = true)
         public void onEvent(String event) {
             received.add(event);
+        }
+    }
+
+    public static class IntervalDedupHandler {
+        @Subscribe(intervalMillis = 60_000, deduplicate = true)
+        public void onEvent(Object event) {
+        }
+    }
+
+    /** Moves the subscriber's accepted timestamp while equality is evaluated between the two interval checks. */
+    static final class RetimingEvent {
+        final EventBus.SubIdentifier identifier;
+
+        RetimingEvent(EventBus.SubIdentifier identifier) {
+            this.identifier = identifier;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (other instanceof RetimingEvent && other != this) {
+                identifier.recordPostTime(System.nanoTime());
+            }
+            return false;
+        }
+
+        @Override
+        public int hashCode() {
+            return 0;
         }
     }
 

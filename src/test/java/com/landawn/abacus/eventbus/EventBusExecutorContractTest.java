@@ -10,8 +10,10 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import java.io.File;
 import java.lang.management.ManagementFactory;
 import java.lang.ref.WeakReference;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -24,10 +26,14 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+
+import javax.tools.JavaCompiler;
+import javax.tools.ToolProvider;
 
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -225,9 +231,11 @@ public class EventBusExecutorContractTest extends TestBase {
 
     @Test
     void create_whenSecurityManagerGuardsSystemGroup_stillUsesTopLevelThreadGroup(@TempDir Path directory) throws Exception {
-        // JDK 24 and later refuse to start with a security manager enabled.
-        assumeTrue(Runtime.version().feature() < 24, "A security manager can only be enabled on JDK 21-23");
-        assertProbeSucceeds(directory, "EVENTBUS_SECURITY_MANAGER_GROUP_OK", List.of("-Djava.security.manager=allow"), SecurityManagerThreadGroupProbe.class);
+        // JDK 24 and later refuse to start with a security manager enabled, so this branch runs on JDK 21.
+        Path javaHome = securityManagerJavaHome();
+        assumeTrue(javaHome != null, "JDK 21 is required to install a security manager");
+        assertProbeSucceeds(directory, "EVENTBUS_SECURITY_MANAGER_GROUP_OK", javaHome, List.of("-Djava.security.manager=allow"), true,
+                SecurityManagerThreadGroupProbe.class);
     }
 
     @ParameterizedTest
@@ -428,6 +436,144 @@ public class EventBusExecutorContractTest extends TestBase {
                 shutdownAndAwaitTermination(executor);
             }
         }
+    }
+
+    @Test
+    void post_whenWorkerIsCreatedFromNonNormalPriority_normalizesPriority() throws Exception {
+        ThreadFactory factory = defaultWorkerFactory();
+        AtomicReference<Thread> created = new AtomicReference<>();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread creator = new Thread(() -> {
+            int original = Thread.currentThread().getPriority();
+            Thread.currentThread().setPriority(Thread.MAX_PRIORITY);
+            try {
+                if (Thread.currentThread().getPriority() == Thread.NORM_PRIORITY) {
+                    throw new AssertionError("The creating thread kept normal priority, so the factory branch cannot be observed");
+                }
+                Thread worker = factory.newThread(() -> {
+                });
+                created.set(worker);
+            } catch (Throwable error) {
+                failure.set(error);
+            } finally {
+                Thread.currentThread().setPriority(original);
+            }
+        }, "eventbus-priority-creator");
+        creator.setPriority(Thread.MAX_PRIORITY);
+        creator.start();
+        creator.join(5000);
+
+        assertNull(failure.get());
+        Thread worker = created.get();
+        assertNotNull(worker);
+        assertFalse(worker.isAlive(), "The factory must be observable without starting a pool worker");
+        assertTrue(worker.isDaemon());
+        assertTrue(worker.getName().startsWith("EventBus-worker-"), worker.getName());
+        assertEquals(Thread.NORM_PRIORITY, worker.getPriority());
+    }
+
+    @Test
+    void create_whenTrackedExecutorWasCollected_dropsClearedReference() throws Exception {
+        Field registry = EventBus.class.getDeclaredField("HOOKED_EXECUTORS");
+        registry.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<WeakReference<ExecutorService>> hooked = (List<WeakReference<ExecutorService>>) registry.get(null);
+        WeakReference<ExecutorService> cleared = new WeakReference<>(null);
+        LifecycleExecutor next = new LifecycleExecutor();
+        try {
+            synchronized (hooked) {
+                hooked.add(cleared);
+            }
+
+            EventBus.create("after-cleared-reference", next);
+
+            synchronized (hooked) {
+                assertFalse(hooked.contains(cleared), "A cleared executor reference must be removed on the next registration");
+                assertTrue(hooked.stream().noneMatch(ref -> ref.get() == null));
+                assertTrue(hooked.stream().anyMatch(ref -> ref.get() == next));
+            }
+        } finally {
+            shutdownAndAwaitTermination(next);
+        }
+    }
+
+    @Test
+    void shutdownProbe_whenRun_leavesProbeUnstarted() throws Exception {
+        Field probeField = EventBus.class.getDeclaredField("SHUTDOWN_PROBE");
+        probeField.setAccessible(true);
+        Thread probe = (Thread) probeField.get(null);
+        assertEquals(Thread.State.NEW, probe.getState());
+        Field holderField = Thread.class.getDeclaredField("holder");
+        holderField.setAccessible(true);
+        Object holder = holderField.get(probe);
+        Field taskField = holder.getClass().getDeclaredField("task");
+        taskField.setAccessible(true);
+        Runnable task = (Runnable) taskField.get(holder);
+
+        assertDoesNotThrow(task::run);
+
+        assertEquals(Thread.State.NEW, probe.getState(), "The probe body must not start the thread removeShutdownHook depends on");
+        assertFalse(Runtime.getRuntime().removeShutdownHook(probe), "The probe is a detector, not a registered hook");
+    }
+
+    @Test
+    void topLevelThreadGroup_whenCallerIsOutsideMainGroup_returnsDocumentedGroup() throws Exception {
+        Method topLevel = EventBus.class.getDeclaredMethod("topLevelThreadGroup");
+        topLevel.setAccessible(true);
+        ThreadGroup fromTestThread = (ThreadGroup) topLevel.invoke(null);
+        ThreadGroup system = fromTestThread;
+        while (system.getParent() != null) {
+            system = system.getParent();
+        }
+        assertNotSame(system, fromTestThread);
+
+        AtomicReference<ThreadGroup> fromSystem = new AtomicReference<>();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread inSystem = new Thread(system, () -> invokeTopLevel(topLevel, fromSystem, failure), "eventbus-system-group");
+        inSystem.start();
+        inSystem.join(5000);
+        assertNull(failure.get());
+        assertSame(system, fromSystem.get(), "A caller already in the system group is the top of the walk");
+
+        ThreadGroup nested = new ThreadGroup(fromTestThread, "eventbus-nested");
+        ThreadGroup deeper = new ThreadGroup(nested, "eventbus-deeper");
+        AtomicReference<ThreadGroup> fromDeeper = new AtomicReference<>();
+        Thread inDeeper = new Thread(deeper, () -> invokeTopLevel(topLevel, fromDeeper, failure), "eventbus-deeper-caller");
+        inDeeper.start();
+        inDeeper.join(5000);
+        assertNull(failure.get());
+        assertSame(fromTestThread, fromDeeper.get(), "The walk must climb to the group directly under the system group");
+    }
+
+    @Test
+    void shutdown_whenDefaultExecutorAwaitIsInterrupted_preservesInterrupt(@TempDir Path directory) throws Exception {
+        assertProbeSucceeds(directory, "EVENTBUS_DEFAULT_INTERRUPT_OK", Path.of(System.getProperty("java.home")),
+                List.of("--add-opens", "java.base/java.lang=ALL-UNNAMED"), true, DefaultExecutorInterruptProbe.class);
+    }
+
+    @Test
+    void create_whenVendorReportsAndroid_usesAndroidThreadPool(@TempDir Path directory) throws Exception {
+        Path classes = Files.createDirectories(directory.resolve("classes"));
+        Path source = Files.createDirectories(directory.resolve("src/android/os")).resolve("AsyncTask.java");
+        Files.writeString(source, """
+                package android.os;
+                import java.util.concurrent.Executor;
+                import java.util.concurrent.Executors;
+                public class AsyncTask {
+                    public static final Executor SERIAL_EXECUTOR = Runnable::run;
+                    public static final Executor THREAD_POOL_EXECUTOR = Executors.newFixedThreadPool(2, runnable -> {
+                        Thread thread = new Thread(runnable, "android-stub-worker");
+                        thread.setDaemon(true);
+                        return thread;
+                    });
+                }
+                """);
+        JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+        assertNotNull(compiler, "This test requires a JDK");
+        assertEquals(0, compiler.run(null, null, null, "-d", classes.toString(), source.toString()));
+
+        assertProbeSucceeds(directory, "EVENTBUS_ANDROID_EXECUTOR_OK", Path.of(System.getProperty("java.home")), List.of(), true, classes,
+                AndroidVendorProbe.class);
     }
 
     public static class Listener {
@@ -725,6 +871,14 @@ public class EventBusExecutorContractTest extends TestBase {
                 failure.get().printStackTrace();
                 return;
             }
+            // The application thread above sits one level under main, so its walk hits the parent-access denial.
+            // This call sits in main itself, directly under the system group, so the first getParent() is denied.
+            java.lang.reflect.Method topLevel = EventBus.class.getDeclaredMethod("topLevelThreadGroup");
+            topLevel.setAccessible(true);
+            if (topLevel.invoke(null) != main) {
+                System.out.println("Caller in the main group resolved a different group");
+                return;
+            }
             java.lang.reflect.Field probe = EventBus.class.getDeclaredField("SHUTDOWN_PROBE");
             probe.setAccessible(true);
             ThreadGroup hookGroup = ((Thread) probe.get(null)).getThreadGroup();
@@ -733,8 +887,103 @@ public class EventBusExecutorContractTest extends TestBase {
             } else if (!"EVENTBUS_WORKER_GROUP_OK".equals(workerResult.get())) {
                 System.out.println(workerResult.get());
             } else {
+                dumpCoverageIfEnabled();
                 System.out.println("EVENTBUS_SECURITY_MANAGER_GROUP_OK");
             }
+        }
+    }
+
+    /**
+     * Interrupts the default executor's shutdown hook while it is waiting for a still-running delivery, then records
+     * coverage after that hook has preserved the interrupt and returned.
+     */
+    public static final class DefaultExecutorInterruptProbe {
+        public static void main(String[] args) throws Exception {
+            CountDownLatch started = new CountDownLatch(1);
+            CountDownLatch interrupted = new CountDownLatch(1);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            // Resolve the hook before exit. Its thread exists as soon as EventBus is initialized, but a name scan
+            // during shutdown can miss it because the hook returns as soon as this task interrupts it.
+            EventBus.getDefault();
+            Thread hook = findShutdownHook("EventBus-default-executor-shutdown");
+            Subscriber<String> blocker = event -> {
+                try {
+                    started.countDown();
+                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                    while (hook.getState() != Thread.State.TIMED_WAITING) {
+                        if (hook.getState() == Thread.State.TERMINATED || System.nanoTime() > deadline) {
+                            throw new AssertionError("Default executor hook never waited for termination: " + hook.getState());
+                        }
+                        Thread.onSpinWait();
+                    }
+                    hook.interrupt();
+                    interrupted.countDown();
+                } catch (Throwable error) {
+                    failure.set(error);
+                    interrupted.countDown();
+                }
+            };
+            EventBus.create().register(blocker, "interrupt", ThreadMode.THREAD_POOL_EXECUTOR).post("interrupt", "block");
+            if (!started.await(5, TimeUnit.SECONDS)) {
+                throw new AssertionError("Delivery did not start");
+            }
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                try {
+                    if (!interrupted.await(5, TimeUnit.SECONDS)) {
+                        throw new AssertionError("Default executor hook was not interrupted");
+                    }
+                    if (failure.get() != null) {
+                        failure.get().printStackTrace();
+                        return;
+                    }
+                    hook.join(5000);
+                    if (hook.isAlive()) {
+                        System.out.println("Default executor hook is still alive");
+                        return;
+                    }
+                    if (!hook.isInterrupted()) {
+                        System.out.println("Default executor hook lost the interrupt status");
+                        return;
+                    }
+                    dumpCoverageIfEnabled();
+                    System.out.println("EVENTBUS_DEFAULT_INTERRUPT_OK");
+                } catch (Throwable error) {
+                    error.printStackTrace();
+                }
+            }, "default-executor-interrupt-observer"));
+            System.exit(0);
+        }
+    }
+
+    /**
+     * Loads EventBus with the vendor properties that select the Android executor and a stand-in {@code AsyncTask}
+     * pool on the classpath. The desktop branch is what every other test runs.
+     */
+    public static final class AndroidVendorProbe {
+        public static void main(String[] args) throws Exception {
+            // The launcher overwrites -Djava.vendor, so set it before IOUtil reads the flag.
+            System.setProperty("java.vendor", "Android");
+            System.setProperty("java.vm.vendor", "Android");
+            if (!com.landawn.abacus.util.IOUtil.IS_PLATFORM_ANDROID) {
+                throw new AssertionError("java.vendor did not select the Android platform branch: " + System.getProperty("java.vendor"));
+            }
+            CountDownLatch delivered = new CountDownLatch(1);
+            AtomicReference<Thread> worker = new AtomicReference<>();
+            AtomicReference<String> received = new AtomicReference<>();
+            Subscriber<String> subscriber = event -> {
+                worker.set(Thread.currentThread());
+                received.set(event);
+                delivered.countDown();
+            };
+            EventBus.create().register(subscriber, "android", ThreadMode.THREAD_POOL_EXECUTOR).post("android", "delivered");
+            if (!delivered.await(5, TimeUnit.SECONDS)) {
+                throw new AssertionError("Android executor did not deliver the event");
+            }
+            if (!"delivered".equals(received.get()) || worker.get() == Thread.currentThread() || !worker.get().isDaemon()) {
+                throw new AssertionError("Incorrect Android executor delivery: " + received.get() + " on " + worker.get());
+            }
+            dumpCoverageIfEnabled();
+            System.out.println("EVENTBUS_ANDROID_EXECUTOR_OK");
         }
     }
 
@@ -884,11 +1133,29 @@ public class EventBusExecutorContractTest extends TestBase {
     }
 
     private static void assertProbeSucceeds(Path directory, String successLine, List<String> jvmOptions, Class<?> probe, String... args) throws Exception {
+        assertProbeSucceeds(directory, successLine, Path.of(System.getProperty("java.home")), jvmOptions, false, null, probe, args);
+    }
+
+    private static void assertProbeSucceeds(Path directory, String successLine, Path javaHome, List<String> jvmOptions, boolean recordCoverage,
+            Class<?> probe, String... args) throws Exception {
+        assertProbeSucceeds(directory, successLine, javaHome, jvmOptions, recordCoverage, null, probe, args);
+    }
+
+    private static void assertProbeSucceeds(Path directory, String successLine, Path javaHome, List<String> jvmOptions, boolean recordCoverage,
+            Path classpathPrefix, Class<?> probe, String... args) throws Exception {
+        String executable = System.getProperty("os.name").startsWith("Windows") ? "java.exe" : "java";
         List<String> command = new ArrayList<>();
-        command.add(Path.of(System.getProperty("java.home"), "bin", "java").toString());
+        command.add(javaHome.resolve("bin").resolve(executable).toString());
+        if (recordCoverage) {
+            command.addAll(jacocoAgentArguments());
+        }
         command.addAll(jvmOptions);
         command.add("-cp");
-        command.add(System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")));
+        String classpath = System.getProperty("surefire.test.class.path", System.getProperty("java.class.path"));
+        if (classpathPrefix != null) {
+            classpath = classpathPrefix + File.pathSeparator + classpath;
+        }
+        command.add(classpath);
         command.add(probe.getName());
         command.addAll(List.of(args));
         Path output = directory.resolve(probe.getSimpleName() + ".log");
@@ -906,10 +1173,76 @@ public class EventBusExecutorContractTest extends TestBase {
         }
     }
 
+    /** JDK 21 can still install a security manager. Later JDKs use a sibling JDK 21 when one is installed. */
+    private static Path securityManagerJavaHome() {
+        if (Runtime.version().feature() < 24) {
+            return Path.of(System.getProperty("java.home"));
+        }
+        Path sibling = Path.of(System.getProperty("java.home")).getParent();
+        if (sibling == null) {
+            return null;
+        }
+        Path home = sibling.resolve("jdk-21");
+        String executable = System.getProperty("os.name").startsWith("Windows") ? "java.exe" : "java";
+        return Files.isRegularFile(home.resolve("bin").resolve(executable)) ? home : null;
+    }
+
+    private static List<String> jacocoAgentArguments() {
+        return ManagementFactory.getRuntimeMXBean()
+                .getInputArguments()
+                .stream()
+                .filter(argument -> argument.startsWith("-javaagent:") && argument.contains("jacoco"))
+                .map(argument -> argument + ",dumponexit=false,append=true")
+                .toList();
+    }
+
+    private static void dumpCoverageIfEnabled() throws ReflectiveOperationException {
+        final Class<?> runtime;
+        try {
+            runtime = Class.forName("org.jacoco.agent.rt.RT");
+        } catch (ClassNotFoundException noCoverageAgent) {
+            return;
+        }
+        Object agent = runtime.getMethod("getAgent").invoke(null);
+        Class.forName("org.jacoco.agent.rt.IAgent").getMethod("dump", boolean.class).invoke(agent, false);
+    }
+
+    private static ThreadFactory defaultWorkerFactory() throws ReflectiveOperationException {
+        Field executor = EventBus.class.getDeclaredField("DEFAULT_EXECUTOR");
+        executor.setAccessible(true);
+        Object delegated = executor.get(null);
+        Field delegate = delegated.getClass().getDeclaredField("e");
+        delegate.setAccessible(true);
+        return ((ThreadPoolExecutor) delegate.get(delegated)).getThreadFactory();
+    }
+
+    private static void invokeTopLevel(Method topLevel, AtomicReference<ThreadGroup> group, AtomicReference<Throwable> failure) {
+        try {
+            group.set((ThreadGroup) topLevel.invoke(null));
+        } catch (Throwable error) {
+            failure.set(error);
+        }
+    }
+
     private static void invokeShutdownHook() throws ReflectiveOperationException {
         Method shutdown = EventBus.class.getDeclaredMethod("shutdownTrackedExecutors");
         shutdown.setAccessible(true);
         shutdown.invoke(null);
+    }
+
+    private static Thread findShutdownHook(String name) throws Exception {
+        Class<?> hooksClass = Class.forName("java.lang.ApplicationShutdownHooks");
+        Field hooksField = hooksClass.getDeclaredField("hooks");
+        hooksField.setAccessible(true);
+        synchronized (hooksClass) {
+            Map<?, ?> hooks = (Map<?, ?>) hooksField.get(null);
+            for (Object hook : hooks.keySet()) {
+                if (hook instanceof Thread thread && name.equals(thread.getName())) {
+                    return thread;
+                }
+            }
+        }
+        throw new AssertionError("Shutdown hook was not registered: " + name);
     }
 
     private static int applicationShutdownHookCount() throws Exception {
