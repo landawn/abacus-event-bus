@@ -26,7 +26,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -440,7 +439,8 @@ public class EventBusExecutorContractTest extends TestBase {
 
     @Test
     void post_whenWorkerIsCreatedFromNonNormalPriority_normalizesPriority() throws Exception {
-        ThreadFactory factory = defaultWorkerFactory();
+        Method factory = EventBus.class.getDeclaredMethod("newDefaultWorker", Runnable.class);
+        factory.setAccessible(true);
         AtomicReference<Thread> created = new AtomicReference<>();
         AtomicReference<Throwable> failure = new AtomicReference<>();
         Thread creator = new Thread(() -> {
@@ -450,7 +450,7 @@ public class EventBusExecutorContractTest extends TestBase {
                 if (Thread.currentThread().getPriority() == Thread.NORM_PRIORITY) {
                     throw new AssertionError("The creating thread kept normal priority, so the factory branch cannot be observed");
                 }
-                Thread worker = factory.newThread(() -> {
+                Thread worker = (Thread) factory.invoke(null, (Runnable) () -> {
                 });
                 created.set(worker);
             } catch (Throwable error) {
@@ -1205,15 +1205,6 @@ public class EventBusExecutorContractTest extends TestBase {
         }
         Object agent = runtime.getMethod("getAgent").invoke(null);
         Class.forName("org.jacoco.agent.rt.IAgent").getMethod("dump", boolean.class).invoke(agent, false);
-    }
-
-    private static ThreadFactory defaultWorkerFactory() throws ReflectiveOperationException {
-        Field executor = EventBus.class.getDeclaredField("DEFAULT_EXECUTOR");
-        executor.setAccessible(true);
-        Object delegated = executor.get(null);
-        Field delegate = delegated.getClass().getDeclaredField("e");
-        delegate.setAccessible(true);
-        return ((ThreadPoolExecutor) delegate.get(delegated)).getThreadFactory();
     }
 
     private static void invokeTopLevel(Method topLevel, AtomicReference<ThreadGroup> group, AtomicReference<Throwable> failure) {

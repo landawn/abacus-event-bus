@@ -136,6 +136,11 @@ public class EventBus {
 
     private static final Executor DEFAULT_EXECUTOR;
 
+    /** Thread group for {@link #newDefaultWorker}; {@code null} on Android, which does not use that factory. */
+    private static final ThreadGroup DEFAULT_WORKER_GROUP = IOUtil.IS_PLATFORM_ANDROID ? null : topLevelThreadGroup();
+
+    private static final AtomicInteger DEFAULT_WORKER_NUMBER = new AtomicInteger();
+
     static {
         if (IOUtil.IS_PLATFORM_ANDROID) {
             DEFAULT_EXECUTOR = AndroidUtil.getThreadPoolExecutor();
@@ -151,21 +156,10 @@ public class EventBus {
             // created it, keeping them for its whole life - not just until it idles out, since a worker kept busy by
             // other posters never times out. Not inheriting would change the context class loader subscribers see;
             // getDefault() documents the limitation and the custom-executor alternative.
-            final ThreadGroup workerGroup = topLevelThreadGroup();
-            final AtomicInteger workerNumber = new AtomicInteger();
             final ThreadPoolExecutor threadPoolExecutor = new ThreadPoolExecutor(//
                     N.max(8, IOUtil.CPU_CORES), // coreThreadPoolSize
                     N.max(64, IOUtil.CPU_CORES), // maxThreadPoolSize
-                    180L, TimeUnit.SECONDS, new LinkedBlockingQueue<>(), r -> {
-                        final Thread t = new Thread(workerGroup, r, "EventBus-worker-" + workerNumber.incrementAndGet(), 0);
-                        t.setDaemon(true);
-
-                        if (t.getPriority() != Thread.NORM_PRIORITY) {
-                            t.setPriority(Thread.NORM_PRIORITY);
-                        }
-
-                        return t;
-                    });
+                    180L, TimeUnit.SECONDS, new LinkedBlockingQueue<>(), EventBus::newDefaultWorker);
 
             // With an unbounded queue the pool never grows past its core size, so without this the
             // N.max(8, cores) core workers would live for the rest of the JVM once started.
@@ -334,6 +328,25 @@ public class EventBus {
 
             HOOKED_EXECUTORS.add(new WeakReference<>(executorService));
         }
+    }
+
+    /**
+     * Builds a daemon worker for {@link #DEFAULT_EXECUTOR}. {@code new Thread} copies the creating thread's
+     * priority, so a poster running above or below normal priority would otherwise leave the worker there for
+     * its whole life.
+     *
+     * @param task the worker's runnable
+     * @return an unstarted daemon thread at {@link Thread#NORM_PRIORITY}
+     */
+    private static Thread newDefaultWorker(final Runnable task) {
+        final Thread t = new Thread(DEFAULT_WORKER_GROUP, task, "EventBus-worker-" + DEFAULT_WORKER_NUMBER.incrementAndGet(), 0);
+        t.setDaemon(true);
+
+        if (t.getPriority() != Thread.NORM_PRIORITY) {
+            t.setPriority(Thread.NORM_PRIORITY);
+        }
+
+        return t;
     }
 
     /**

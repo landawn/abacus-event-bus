@@ -102,9 +102,9 @@ and are not reachable from a legal subscriber or the current `ThreadMode` enum:
 
 | Lines | Reason |
 | --- | --- |
-| 851, 1756 | `ThreadMode` defines only `DEFAULT` and `THREAD_POOL_EXECUTOR`. Both are supported, so the unsupported-mode throw and the dispatch `default` arm never run. |
-| 1040–1041 | `Subscriber.on(Object)` exists. The `NoSuchMethodException` catch is a safeguard for a missing contract method. |
-| 1137 | The event-type fallback handles a reflective type that is not a class, parameterized type, generic array, type variable, or wildcard. Cyclic bounds such as `T extends T` are rejected by javac, so a subscriber declaration cannot supply one. |
+| 864, 1769 | `ThreadMode` defines only `DEFAULT` and `THREAD_POOL_EXECUTOR`. Both are supported, so the unsupported-mode throw and the dispatch `default` arm never run. |
+| 1053–1054 | `Subscriber.on(Object)` exists. The `NoSuchMethodException` catch is a safeguard for a missing contract method. |
+| 1150 | The event-type fallback handles a reflective type that is not a class, parameterized type, generic array, type variable, or wildcard. Cyclic bounds such as `T extends T` are rejected by javac, so a subscriber declaration cannot supply one. |
 
 Partial branch gaps that do not remove a whole line — a null executor passed to the private constructor, an event-id index entry that registration never omits, the null diagnostic fallback, and some `SubIdentifier.equals` field combinations — stay uncovered for the same reason: the public API does not produce those states. Do not manufacture an extra `ThreadMode` constant or a fake reflective type to move the number.
 
