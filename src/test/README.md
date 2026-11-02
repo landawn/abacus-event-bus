@@ -83,38 +83,30 @@ This keeps shutdown coverage independent of GC timing and agent-hook ordering.
 
 ## Coverage
 
-The 2026-10-15 clean coverage run contains 222 passing test invocations across 163 test methods with
-abacus-common 8.2.0. Standard discovery passes on Java 25; the explicit suite also
-passes on Java 21 with randomized class/method order (seed 15102026), selecting the
-same 222 cases without duplicates.
-The cleanup preserves all baseline covered instructions and branch counts on every source line.
+JaCoCo 0.8.15, from `mvn clean test jacoco:report`. The 2026-11-01 run on Java 25
+(255 passing test invocations, abacus-common 8.3.2) is the current total. A JDK 21
+child covers the security-manager thread-group branches, because JDK 24 and later
+cannot install a security manager. No production code was deleted and no packages
+were excluded to raise the percentage.
 
 | Measure | Covered / total | Coverage |
 | --- | --- | --- |
-| Lines | 552 / 559 | 98.7% |
-| Branches | 351 / 367 | 95.6% |
-| Methods | 71 / 71 | 100% |
+| Lines | 609 / 614 | 99.2% |
+| Instructions | 2,824 / 2,849 | 99.1% |
+| Branches | 373 / 387 | 96.4% |
+| Methods | 78 / 78 | 100% |
 | Classes | 4 / 4 | 100% |
 
-These are JaCoCo report totals, including defensive and platform-specific code.
-No production code or coverage exclusions were changed to raise the percentage.
-The remaining gaps are in `EventBus.java`:
+Line coverage is the figure tracked here. The five missed lines are all in `EventBus.java`
+and are not reachable from a legal subscriber or the current `ThreadMode` enum:
 
-| Area | Remaining limitation |
+| Lines | Reason |
 | --- | --- |
-| Android default executor | Requires an Android runtime; the desktop JVM takes the other platform branch. |
-| Unsupported thread modes | The dependency currently defines only the two supported enum values. |
-| Discovery safeguards | Missing `Subscriber.on(Object)`, cyclic bounds, and unknown reflective types cannot be supplied by ordinary Java subscriber declarations. |
-| Private constructor fallback | Public factories reject a null executor before reaching the constructor's null fallback. |
-| Registry/metadata safeguards | Normal registration preserves the event-ID index and derives immutable annotation flags from the same method. |
-| Diagnostic null fallback | Formatting null does not throw, so the catch block cannot see null. |
-| Interval recheck after equality | Reservation changes cause a retry before this check; its suppression path cannot be forced deterministically through the current monotonic-clock API. |
+| 851, 1756 | `ThreadMode` defines only `DEFAULT` and `THREAD_POOL_EXECUTOR`. Both are supported, so the unsupported-mode throw and the dispatch `default` arm never run. |
+| 1040–1041 | `Subscriber.on(Object)` exists. The `NoSuchMethodException` catch is a safeguard for a missing contract method. |
+| 1137 | The event-type fallback handles a reflective type that is not a class, parameterized type, generic array, type variable, or wildcard. Cyclic bounds such as `T extends T` are rejected by javac, so a subscriber declaration cannot supply one. |
 
-Real shutdown fallback, shutdown failure/interruption, wildcard owners, identical
-diamond annotations, mixed sticky handlers, throwing equality, diagnostic failures,
-and commit/rejection races are exercised by focused regression tests. Keep future
-coverage improvements tied to observable behavior instead of manufacturing invalid
-reflection states or removing defensive branches for the metric.
+Partial branch gaps that do not remove a whole line — a null executor passed to the private constructor, an event-id index entry that registration never omits, the null diagnostic fallback, and some `SubIdentifier.equals` field combinations — stay uncovered for the same reason: the public API does not produce those states. Do not manufacture an extra `ThreadMode` constant or a fake reflective type to move the number.
 
 ## Consolidation guide
 

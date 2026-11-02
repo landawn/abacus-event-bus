@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.File;
 import java.io.OutputStream;
+import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -335,11 +336,23 @@ public class EventBusGenericTest extends TestBase {
                 directory.resolve("src/module-info.java").toString(), source.resolve("Main.java").toString()));
 
         final Path output = directory.resolve("output.txt");
+        final List<String> command = new ArrayList<>();
+        command.add(Path.of(System.getProperty("java.home"), "bin", "java").toString());
+        // The fallback setAccessible path runs in this child. Inherit the agent so that execution is in the report.
+        ManagementFactory.getRuntimeMXBean()
+                .getInputArguments()
+                .stream()
+                .filter(argument -> argument.startsWith("-javaagent:") && argument.contains("jacoco"))
+                .map(argument -> argument.contains("append=") ? argument : argument + ",append=true")
+                .forEach(command::add);
         // ALL-SYSTEM: abacus-common, as an automatic module, needs modules such as java.sql resolved.
-        final Process process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(), "--add-modules", "ALL-SYSTEM",
-                "--module-path", modules + File.pathSeparator + classes, "-m", "app/app.handlers.Main").redirectErrorStream(true)
-                        .redirectOutput(output.toFile())
-                        .start();
+        command.add("--add-modules");
+        command.add("ALL-SYSTEM");
+        command.add("--module-path");
+        command.add(modules + File.pathSeparator + classes);
+        command.add("-m");
+        command.add("app/app.handlers.Main");
+        final Process process = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(output.toFile()).start();
         try {
             assertTrue(process.waitFor(30, TimeUnit.SECONDS), "Child JVM did not finish");
         } finally {
