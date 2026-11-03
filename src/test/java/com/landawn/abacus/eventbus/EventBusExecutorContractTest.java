@@ -24,6 +24,7 @@ import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -498,6 +499,44 @@ public class EventBusExecutorContractTest extends TestBase {
     }
 
     @Test
+    void create_whenExecutorIsCommonPool_doesNotTrackIt() throws Exception {
+        Field registry = EventBus.class.getDeclaredField("HOOKED_EXECUTORS");
+        registry.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<WeakReference<ExecutorService>> hooked = (List<WeakReference<ExecutorService>>) registry.get(null);
+
+        // Tracking it would make the shutdown hook await quiescence of the whole common pool at exit.
+        EventBus.create("common-pool", ForkJoinPool.commonPool());
+
+        synchronized (hooked) {
+            assertTrue(hooked.stream().noneMatch(ref -> ref.get() == ForkJoinPool.commonPool()));
+        }
+    }
+
+    @Test
+    void post_whenOnlySynchronousDeliveryIsUsed_installsNoDefaultExecutorHook(@TempDir Path directory) throws Exception {
+        assertProbeSucceeds(directory, "EVENTBUS_LAZY_DEFAULT_HOOK_OK", Path.of(System.getProperty("java.home")),
+                List.of("--add-opens", "java.base/java.lang=ALL-UNNAMED"), true, LazyDefaultHookProbe.class);
+    }
+
+    @Test
+    void create_whenSecurityManagerDeniesShutdownHooks_keepsBusUsable(@TempDir Path directory) throws Exception {
+        // JDK 24 and later refuse to start with a security manager enabled, so this branch runs on JDK 21.
+        Path javaHome = securityManagerJavaHome();
+        assumeTrue(javaHome != null, "JDK 21 is required to install a security manager");
+        assertProbeSucceeds(directory, "EVENTBUS_SHUTDOWN_HOOKS_DENIED_OK", javaHome, List.of("-Djava.security.manager=allow"), true,
+                ShutdownHooksDeniedProbe.class);
+    }
+
+    @Test
+    void register_whenHandlerCannotBeMadeAccessible_reportsFirstFailureWithFallbackSuppressed(@TempDir Path directory) throws Exception {
+        // A security manager denying suppressAccessChecks makes both setAccessible attempts fail without JPMS setup.
+        Path javaHome = securityManagerJavaHome();
+        assumeTrue(javaHome != null, "JDK 21 is required to install a security manager");
+        assertProbeSucceeds(directory, "EVENTBUS_ACCESS_FAILURE_OK", javaHome, List.of("-Djava.security.manager=allow"), true, AccessChecksDeniedProbe.class);
+    }
+
+    @Test
     void shutdownProbe_whenRun_leavesProbeUnstarted() throws Exception {
         Field probeField = EventBus.class.getDeclaredField("SHUTDOWN_PROBE");
         probeField.setAccessible(true);
@@ -805,6 +844,139 @@ public class EventBusExecutorContractTest extends TestBase {
     }
 
     /**
+     * Delivers synchronously on the default bus and checks that no default-executor hook exists until the first
+     * asynchronous delivery creates a worker: a registered hook would pin this library's class loader until exit.
+     */
+    public static final class LazyDefaultHookProbe {
+        public static void main(String[] args) throws Exception {
+            List<String> received = new ArrayList<>();
+            Subscriber<String> inline = received::add;
+            EventBus.getDefault().register(inline, "sync").post("sync", "inline");
+            if (!received.equals(List.of("inline")) || hasShutdownHook("EventBus-default-executor-shutdown")) {
+                System.out.println("Synchronous delivery installed the default-executor hook: " + received);
+                return;
+            }
+            CountDownLatch delivered = new CountDownLatch(1);
+            Subscriber<String> async = event -> delivered.countDown();
+            EventBus.getDefault().register(async, "async", ThreadMode.THREAD_POOL_EXECUTOR).post("async", "queued");
+            if (!delivered.await(5, TimeUnit.SECONDS)) {
+                System.out.println("Asynchronous event was not delivered");
+            } else if (!hasShutdownHook("EventBus-default-executor-shutdown")) {
+                System.out.println("The first default worker did not install the default-executor hook");
+            } else {
+                dumpCoverageIfEnabled();
+                System.out.println("EVENTBUS_LAZY_DEFAULT_HOOK_OK");
+            }
+        }
+    }
+
+    /**
+     * Initializes EventBus under a security manager that denies {@code RuntimePermission("shutdownHooks")}. Without a
+     * hook, asynchronous delivery and custom executors must still work instead of failing class initialization.
+     */
+    public static final class ShutdownHooksDeniedProbe {
+        @SuppressWarnings("removal")
+        public static void main(String[] args) throws Exception {
+            // Initialize the common utility and logging runtimes first: they may register shutdown hooks of their own.
+            Class.forName("com.landawn.abacus.util.N");
+            com.landawn.abacus.logging.LoggerFactory.getLogger(ShutdownHooksDeniedProbe.class);
+            System.setSecurityManager(new SecurityManager() {
+                @Override
+                public void checkPermission(java.security.Permission permission) {
+                    if (permission instanceof RuntimePermission && "shutdownHooks".equals(permission.getName())) {
+                        throw new SecurityException("expected: shutdown hooks are denied");
+                    }
+                }
+
+                @Override
+                public void checkPermission(java.security.Permission permission, Object context) {
+                    checkPermission(permission);
+                }
+            });
+            CountDownLatch delivered = new CountDownLatch(1);
+            Subscriber<String> async = event -> delivered.countDown();
+            EventBus.getDefault().register(async, "async", ThreadMode.THREAD_POOL_EXECUTOR).post("async", "queued");
+            if (!delivered.await(5, TimeUnit.SECONDS)) {
+                System.out.println("Asynchronous event was not delivered without a default-executor hook");
+                return;
+            }
+            ExecutorService executor = Executors.newSingleThreadExecutor(task -> {
+                Thread thread = new Thread(task);
+                thread.setDaemon(true);
+                return thread;
+            });
+            EventBus.create("hooks-denied", executor);
+            java.lang.reflect.Field registry = EventBus.class.getDeclaredField("HOOKED_EXECUTORS");
+            registry.setAccessible(true);
+            List<?> hooked = (List<?>) registry.get(null);
+            synchronized (hooked) {
+                if (hooked.stream().anyMatch(ref -> ((WeakReference<?>) ref).get() == executor)) {
+                    System.out.println("Executor was tracked although no shutdown hook could be registered");
+                    return;
+                }
+            }
+            dumpCoverageIfEnabled();
+            System.out.println("EVENTBUS_SHUTDOWN_HOOKS_DENIED_OK");
+        }
+    }
+
+    /**
+     * Registers a subscriber while a security manager denies {@code suppressAccessChecks}, so both the direct and
+     * the abacus-common {@code setAccessible} attempts fail: the first failure must propagate with the second suppressed.
+     */
+    public static final class AccessChecksDeniedProbe {
+        @SuppressWarnings("removal")
+        public static void main(String[] args) throws Exception {
+            Class.forName("com.landawn.abacus.util.N");
+            com.landawn.abacus.logging.LoggerFactory.getLogger(AccessChecksDeniedProbe.class);
+            EventBus bus = EventBus.create();
+            System.setSecurityManager(new SecurityManager() {
+                @Override
+                public void checkPermission(java.security.Permission permission) {
+                    if (permission instanceof java.lang.reflect.ReflectPermission && "suppressAccessChecks".equals(permission.getName())
+                            && calledByEventBusOrClassUtil()) {
+                        throw new SecurityException("expected: access checks cannot be suppressed");
+                    }
+                }
+
+                /** Denies only those library calls: the JDK itself suppresses access checks while parsing annotations. */
+                private boolean calledByEventBusOrClassUtil() {
+                    return StackWalker.getInstance()
+                            .walk(frames -> frames.map(StackWalker.StackFrame::getClassName)
+                                    .dropWhile(name -> !name.equals("java.lang.reflect.AccessibleObject"))
+                                    .dropWhile(name -> name.startsWith("java.lang.reflect."))
+                                    .findFirst()
+                                    .map(name -> name.startsWith(EventBus.class.getName()) || name.equals("com.landawn.abacus.util.ClassUtil"))
+                                    .orElse(false));
+                }
+
+                @Override
+                public void checkPermission(java.security.Permission permission, Object context) {
+                    checkPermission(permission);
+                }
+            });
+            try {
+                bus.register(new AccessDeniedSubscriber());
+                System.out.println("Registration succeeded although the handler could not be made accessible");
+            } catch (SecurityException e) {
+                Throwable[] suppressed = e.getSuppressed();
+                if (suppressed.length == 1 && suppressed[0] instanceof SecurityException && suppressed[0] != e) {
+                    dumpCoverageIfEnabled();
+                    System.out.println("EVENTBUS_ACCESS_FAILURE_OK");
+                } else {
+                    System.out.println("Fallback failure was not suppressed: " + java.util.Arrays.toString(suppressed));
+                }
+            }
+        }
+    }
+
+    public static final class AccessDeniedSubscriber {
+        @Subscribe
+        public void onEvent(String event) {
+        }
+    }
+
+    /**
      * Starts the first default-executor worker from a thread in an application's own group: the worker must still
      * join the top-level group rather than the group of whichever thread happened to post first.
      */
@@ -902,12 +1074,14 @@ public class EventBusExecutorContractTest extends TestBase {
             CountDownLatch started = new CountDownLatch(1);
             CountDownLatch interrupted = new CountDownLatch(1);
             AtomicReference<Throwable> failure = new AtomicReference<>();
-            // Resolve the hook before exit. Its thread exists as soon as EventBus is initialized, but a name scan
-            // during shutdown can miss it because the hook returns as soon as this task interrupts it.
-            EventBus.getDefault();
-            Thread hook = findShutdownHook("EventBus-default-executor-shutdown");
+            AtomicReference<Thread> hookRef = new AtomicReference<>();
             Subscriber<String> blocker = event -> {
                 try {
+                    // Resolve the hook before exit. It is installed before the first default worker exists, so it is
+                    // registered by now; a name scan during shutdown can miss it because the hook returns as soon as
+                    // this task interrupts it.
+                    Thread hook = findShutdownHook("EventBus-default-executor-shutdown");
+                    hookRef.set(hook);
                     started.countDown();
                     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
                     while (hook.getState() != Thread.State.TIMED_WAITING) {
@@ -936,6 +1110,7 @@ public class EventBusExecutorContractTest extends TestBase {
                         failure.get().printStackTrace();
                         return;
                     }
+                    Thread hook = hookRef.get();
                     hook.join(5000);
                     if (hook.isAlive()) {
                         System.out.println("Default executor hook is still alive");
@@ -991,7 +1166,16 @@ public class EventBusExecutorContractTest extends TestBase {
     public static final class ApplicationCode {
         public static void run(boolean defaultExecutorHook, ExecutorService executor) {
             if (defaultExecutorHook) {
-                EventBus.getDefault(); // class initialization installs the default-executor hook
+                // Building the first default worker installs the default-executor hook. The worker itself is never
+                // started: a live worker keeps its creator's context class loader by design.
+                try {
+                    java.lang.reflect.Method factory = EventBus.class.getDeclaredMethod("newDefaultWorker", Runnable.class);
+                    factory.setAccessible(true);
+                    factory.invoke(null, (Runnable) () -> {
+                    });
+                } catch (ReflectiveOperationException e) {
+                    throw new IllegalStateException(e);
+                }
             } else {
                 EventBus.create("application-bus", executor); // the first tracked executor installs that hook
             }
@@ -1136,8 +1320,8 @@ public class EventBusExecutorContractTest extends TestBase {
         assertProbeSucceeds(directory, successLine, Path.of(System.getProperty("java.home")), jvmOptions, false, null, probe, args);
     }
 
-    private static void assertProbeSucceeds(Path directory, String successLine, Path javaHome, List<String> jvmOptions, boolean recordCoverage,
-            Class<?> probe, String... args) throws Exception {
+    private static void assertProbeSucceeds(Path directory, String successLine, Path javaHome, List<String> jvmOptions, boolean recordCoverage, Class<?> probe,
+            String... args) throws Exception {
         assertProbeSucceeds(directory, successLine, javaHome, jvmOptions, recordCoverage, null, probe, args);
     }
 
@@ -1219,6 +1403,15 @@ public class EventBusExecutorContractTest extends TestBase {
         Method shutdown = EventBus.class.getDeclaredMethod("shutdownTrackedExecutors");
         shutdown.setAccessible(true);
         shutdown.invoke(null);
+    }
+
+    private static boolean hasShutdownHook(String name) throws Exception {
+        try {
+            findShutdownHook(name);
+            return true;
+        } catch (AssertionError absent) {
+            return false;
+        }
     }
 
     private static Thread findShutdownHook(String name) throws Exception {

@@ -2,6 +2,8 @@ package com.landawn.abacus.eventbus;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -40,6 +42,35 @@ public class EventBusLookupCacheTest extends TestBase {
         assertEquals(List.of("both", "remaining"), second);
         bus.unregister(two).post(id, "absent again");
         assertTrue(cache(bus).isEmpty());
+    }
+
+    @Test
+    void post_whenHandlersHaveEventIds_cachesOnlyHandlersWithoutEventId() throws Exception {
+        EventBus bus = EventBus.create();
+        MixedIds handler = new MixedIds();
+        bus.register(handler).post("first");
+        EventBus.SubIdentifier[] snapshot = noEventIdSnapshot(bus);
+        assertEquals(1, snapshot.length);
+        assertNull(snapshot[0].eventId);
+
+        // Changes that add or remove no handler without an event ID leave the snapshot valid.
+        List<String> received = new ArrayList<>();
+        Subscriber<String> idOnly = received::add;
+        MixedIds explicit = new MixedIds();
+        bus.register(idOnly, "channel").register(explicit, "explicit").unregister(idOnly);
+        assertSame(snapshot, noEventIdSnapshot(bus));
+        bus.post("second");
+        assertEquals(List.of("any:first", "any:second"), handler.events);
+        assertTrue(explicit.events.isEmpty());
+        assertTrue(received.isEmpty());
+
+        // Re-registering the explicit subscriber without an ID adds a handler without one.
+        bus.register(explicit);
+        assertNull(noEventIdSnapshot(bus));
+        bus.post("third");
+        assertEquals(List.of("any:third"), explicit.events);
+        bus.unregister(explicit);
+        assertNull(noEventIdSnapshot(bus));
     }
 
     // annotation-declared event IDs, re-registration under an explicit ID, and final removal.
@@ -260,6 +291,12 @@ public class EventBusLookupCacheTest extends TestBase {
         var field = EventBus.class.getDeclaredField("listOfEventIdSubMap");
         field.setAccessible(true);
         return (Map<?, ?>) field.get(bus);
+    }
+
+    private static EventBus.SubIdentifier[] noEventIdSnapshot(EventBus bus) throws Exception {
+        var field = EventBus.class.getDeclaredField("noEventIdSubs");
+        field.setAccessible(true);
+        return (EventBus.SubIdentifier[]) field.get(bus);
     }
 
     private static Map<?, ?> eventIdIndex(EventBus bus) throws Exception {

@@ -17,7 +17,8 @@
  *
  * <p>{@link EventBus} delivers posted events to registered {@link Subscriber} instances and to
  * public instance methods marked with {@link Subscribe}. Obtain the process-wide bus with
- * {@link EventBus#getDefault()} or construct a dedicated instance.</p>
+ * {@link EventBus#getDefault()} or create a dedicated instance with {@link EventBus#create()} or one of its
+ * overloads.</p>
  *
  * <p>Supported features:</p>
  * <ul>

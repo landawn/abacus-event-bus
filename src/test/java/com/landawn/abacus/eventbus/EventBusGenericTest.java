@@ -270,6 +270,27 @@ public class EventBusGenericTest extends TestBase {
     }
 
     @Test
+    void register_whenRawSubclassOverloadsInheritedHandler_registersBoth() {
+        // Below the raw supertype there is no bridge, so handle(Number) overloads (not overrides) handle(T).
+        final EventBus bus = EventBus.create();
+        final RawNumberOverload handler = new RawNumberOverload();
+        bus.register(handler);
+        bus.post(7);
+        bus.post("text");
+        assertEquals(2, handler.values.size());
+        assertTrue(handler.values.containsAll(List.of("base:7", "overload:7")));
+    }
+
+    @Test
+    void register_whenSuperinterfaceDeclaresAnnotatedStaticMethod_ignoresIt() {
+        final EventBus bus = EventBus.create();
+        final StaticHelperImplementor handler = new StaticHelperImplementor();
+        bus.register(handler);
+        bus.post("text");
+        assertEquals(List.of("text"), handler.values);
+    }
+
+    @Test
     void register_whenRawSubclassAnnotatesSubscriberContract_usesOverrideMetadata() {
         final EventBus bus = EventBus.create();
         final RawSubscriberOverride handler = new RawSubscriberOverride();
@@ -650,6 +671,33 @@ public class EventBusGenericTest extends TestBase {
         @Subscribe(eventId = "override")
         public void handle(Object event) {
             values.add("override:" + event);
+        }
+    }
+
+    public static class NumberHandlerMiddle<U extends Number> extends GenericHandlerBase<U> {
+    }
+
+    @SuppressWarnings("rawtypes")
+    public static class RawNumberOverload extends NumberHandlerMiddle {
+        @Subscribe
+        public void handle(Number event) {
+            values.add("overload:" + event);
+        }
+    }
+
+    public interface StaticAnnotatedHelper {
+        @Subscribe
+        static void helper(String event) {
+            throw new AssertionError("A static interface method is not a handler");
+        }
+    }
+
+    public static class StaticHelperImplementor implements StaticAnnotatedHelper {
+        final List<String> values = new ArrayList<>();
+
+        @Subscribe
+        public void onEvent(String event) {
+            values.add(event);
         }
     }
 

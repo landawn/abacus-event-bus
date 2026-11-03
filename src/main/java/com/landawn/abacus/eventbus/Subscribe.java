@@ -31,10 +31,12 @@ import com.landawn.abacus.util.ThreadMode;
  *   <li>Must be {@code public} — a non-{@code public} annotated method is silently ignored rather
  *       than rejected (unless it is also {@code static}, see below).</li>
  *   <li>Must have exactly one parameter representing the event type; otherwise registering the
- *       declaring object throws a {@link RuntimeException}.</li>
- *   <li>Must not be {@code static}; otherwise registering the declaring object throws a
- *       {@link RuntimeException}. This check runs before the visibility check, so a non-{@code public}
- *       {@code static} annotated method is rejected rather than ignored.</li>
+ *       declaring object throws a {@link RuntimeException} (a non-{@code public} method is ignored before its
+ *       parameters are checked).</li>
+ *   <li>Must not be {@code static}; otherwise registering an instance of the declaring class or of any subclass
+ *       throws a {@link RuntimeException}. This check runs before the visibility check, so a non-{@code public}
+ *       {@code static} annotated method is rejected rather than ignored. A {@code static} method declared in an
+ *       interface is not inherited by its implementations, so it is ignored instead.</li>
  *   <li>Should not throw checked exceptions (any thrown exceptions are caught and logged).</li>
  * </ul>
  *
@@ -198,7 +200,11 @@ public @interface Subscribe {
      * the moment the event is posted, for every {@link #threadMode()}, so it follows post spacing rather
      * than executor scheduling; a suppressed asynchronous event is never handed to the executor.
      * Accepted callbacks may overlap if a callback runs longer than the interval; a failed callback still
-     * counts as an attempt, while a submission the executor rejects does not, because it was never delivered.
+     * counts as an attempt, while a submission for which {@code Executor.execute} throws before the task has begun
+     * its callback (for example a {@code RejectedExecutionException} under the default {@code AbortPolicy}) does
+     * not, because it was never delivered. An inline executor that runs the callback and only then throws still
+     * counts it. A rejection policy that silently drops the task (such as {@code DiscardPolicy} or
+     * {@code DiscardOldestPolicy}) looks like a successful hand-off to the bus, so the dropped event still counts.
      *
      * <p>This is useful for throttling high-frequency events to prevent overwhelming the subscriber.</p>
      *
@@ -227,15 +233,20 @@ public @interface Subscribe {
      * Controls whether duplicate consecutive events should be ignored.
      *
      * <p>When {@code true}, an event equal to the event of this subscriber's most recently accepted delivery
-     * attempt is ignored. Events are compared using their {@code equals()} method. The comparison is made on
+     * attempt is ignored. The check is {@code previous.equals(event)} after an identity check, so re-posting the
+     * same instance, even after mutating it, is always treated as a duplicate, and the handler keeps a strong
+     * reference to the last accepted event until it is unregistered. The comparison is made on
      * the posting thread at the moment the event is posted, for every {@link #threadMode()}, so "previous"
      * follows posting order, not the order in which an executor happened to run callbacks; a suppressed
      * asynchronous duplicate is never handed to the executor. An event suppressed by
      * {@link #intervalMillis()} is not accepted, so it never becomes the previous event.</p>
      *
      * <p>The comparison uses the most recently accepted delivery attempt, including one whose callback
-     * throws. An asynchronous submission the executor rejects is not one of them: it was never delivered, so
-     * it does not become the "previous event". Filtering is atomic, but distinct accepted callbacks may
+     * throws. An asynchronous submission for which {@code Executor.execute} throws before the task has begun its
+     * callback is not one of them: it was never delivered, so it does not become the "previous event". An inline
+     * executor that runs the callback and only then throws leaves it as the previous event, and so does a task
+     * silently dropped by a discarding rejection policy, because {@code execute} returned normally.
+     * Filtering is atomic, but distinct accepted callbacks may
      * execute concurrently.</p>
      *
      * <p>This is useful for preventing redundant processing of unchanged data.</p>
