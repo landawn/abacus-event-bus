@@ -354,6 +354,30 @@ public class EventBusGenericTest extends TestBase {
     }
 
     @Test
+    void register_whenRawSubclassOfNonPublicMiddleOverloadsHandler_registersBoth() {
+        // As the first public class, the raw subclass holds the visibility bridge handle(Object) beside its own
+        // handle(Number); below the raw supertype that cannot override the inherited handle(T), so both are handlers.
+        final EventBus bus = EventBus.create();
+        final RawOverloadBesideVisibilityBridge handler = new RawOverloadBesideVisibilityBridge();
+        bus.register(handler);
+        bus.post(7);
+        bus.post("text");
+        assertEquals(2, handler.values.size());
+        assertTrue(handler.values.containsAll(List.of("base:7", "overload:7")));
+    }
+
+    @Test
+    void register_whenRawSubclassOfNonPublicMiddleOverloadsSubscriberContract_registersBoth() {
+        final EventBus bus = EventBus.create();
+        final RawContractOverloadBesideVisibilityBridge handler = new RawContractOverloadBesideVisibilityBridge();
+        bus.register(handler);
+        bus.post(7);
+        bus.post("text");
+        assertEquals(2, handler.values.size());
+        assertTrue(handler.values.containsAll(List.of("contract:7", "overload:7")));
+    }
+
+    @Test
     void register_whenRawSubclassOverloadsSubscriberContract_registersBoth() {
         // Below the raw supertype on(Object) is not bridged to on(Number), so the annotated method only overloads the contract.
         final EventBus bus = EventBus.create();
@@ -875,6 +899,28 @@ public class EventBusGenericTest extends TestBase {
         @Subscribe
         public void on(Number event) {
             values.add("override:" + event);
+        }
+    }
+
+    static class HiddenNumberHandlerMiddle<U extends Number> extends HiddenGenericHandlerBase<U> {
+    }
+
+    @SuppressWarnings("rawtypes")
+    public static class RawOverloadBesideVisibilityBridge extends HiddenNumberHandlerMiddle {
+        @Subscribe
+        public void handle(Number event) {
+            values.add("overload:" + event);
+        }
+    }
+
+    static class HiddenNumberSubscriberMiddle<U extends Number> extends HiddenGenericSubscriberBase<U> {
+    }
+
+    @SuppressWarnings("rawtypes")
+    public static class RawContractOverloadBesideVisibilityBridge extends HiddenNumberSubscriberMiddle {
+        @Subscribe
+        public void on(Number event) {
+            values.add("overload:" + event);
         }
     }
 

@@ -1314,15 +1314,59 @@ public class EventBus {
         }
 
         // A public class re-declares each public method it inherits from a non-public superclass as a bridge with the
-        // same descriptor that calls that very method, so such a bridge merges nothing. Only a bridge whose class has
-        // a same-named member with another parameter type can redirect the call to a different declaration.
-        // Known limitation: reflection cannot tell what a bridge calls, so when that class is itself the first public
-        // class below a raw supertype and declares the overload (RawChild extends raw Mid<U extends Number> extends
-        // non-public Base<T>, with handle(Number) in RawChild), its visibility bridge is taken for an override bridge
-        // and the inherited handler is dropped. Telling them apart needs the JLS override rules for raw supertypes.
+        // same descriptor that calls that very method, so such a bridge merges nothing. Reflection cannot tell what a
+        // bridge calls, but an override bridge needs an inherited declaration with its descriptor that the bridge's
+        // class can override, which no member inherited through a raw supertype is: those are erased (JLS 4.8). So a
+        // bridge beside a same-named overload in a class below a raw supertype (RawChild extends raw Mid<U extends
+        // Number> extends non-public Base<T>, with handle(Number) in RawChild) is only a visibility bridge.
+        if (!inheritsWithoutRawSupertype(method.getDeclaringClass(), name, erasedParameterType)) {
+            return false;
+        }
+
+        // Only a bridge whose class has a same-named member with another parameter type can redirect the call to a
+        // different declaration.
         for (final Method member : method.getDeclaringClass().getMethods()) {
             if (member.getName().equals(name) && member.getParameterCount() == 1 && !member.isBridge() && !Modifier.isStatic(member.getModifiers())
                     && member.getParameterTypes()[0] != erasedParameterType) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Returns whether a proper supertype of {@code type}, reached without passing through a raw type reference,
+     * declares a non-bridge instance method {@code name(parameterType)}. Members inherited through a raw reference
+     * are erased (JLS 4.8), so a method of {@code type} with another parameter type cannot override them.
+     *
+     * @param type the class whose supertypes are searched
+     * @param name the method name
+     * @param parameterType the erased type of the method's single parameter
+     * @return {@code true} if such a declaration is inherited along a path without a raw reference
+     */
+    private static boolean inheritsWithoutRawSupertype(final Class<?> type, final String name, final Class<?> parameterType) {
+        final List<java.lang.reflect.Type> supertypes = new ArrayList<>(List.of(type.getGenericInterfaces()));
+
+        if (type.getGenericSuperclass() != null) {
+            supertypes.add(type.getGenericSuperclass());
+        }
+
+        for (final java.lang.reflect.Type supertype : supertypes) {
+            if (supertype instanceof Class<?> reference && reference.getTypeParameters().length > 0) {
+                continue; // a raw reference: everything above it is erased
+            }
+
+            final Class<?> supertypeClass = eventType(supertype, Collections.emptyMap());
+
+            for (final Method declared : supertypeClass.getDeclaredMethods()) {
+                if (declared.getName().equals(name) && declared.getParameterCount() == 1 && declared.getParameterTypes()[0] == parameterType
+                        && !declared.isBridge() && !Modifier.isStatic(declared.getModifiers())) {
+                    return true;
+                }
+            }
+
+            if (inheritsWithoutRawSupertype(supertypeClass, name, parameterType)) {
                 return true;
             }
         }
