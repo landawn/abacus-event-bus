@@ -448,7 +448,9 @@ public class EventBusGenericTest extends TestBase {
         try (OutputStream out = Files.newOutputStream(modules.resolve("abacus-event-bus.jar"));
              JarOutputStream jar = new JarOutputStream(out);
              Stream<Path> files = Files.walk(eventBusClasses)) {
-            for (final Path file : (Iterable<Path>) files.filter(p -> p.toString().endsWith(".class"))::iterator) {
+            // Skip unnamed-package classes (e.g. IDE-compiled tools in the same output folder): a module can't contain them.
+            for (final Path file : (Iterable<Path>) files
+                    .filter(p -> p.toString().endsWith(".class") && eventBusClasses.relativize(p).getNameCount() > 1)::iterator) {
                 jar.putNextEntry(new JarEntry(eventBusClasses.relativize(file).toString().replace('\\', '/')));
                 jar.write(Files.readAllBytes(file));
                 jar.closeEntry();
