@@ -83,6 +83,46 @@ public class EventBusConcurrencyTest extends TestBase {
         assertNull(subscriber.lastEvent);
     }
 
+    @Test
+    void subscribers_whenRegistrationIsBetweenIndexUpdates_agreesWithPost() throws Exception {
+        final EventBus eventBus = EventBus.create();
+        final RegistrationSubscriber subscriber = new RegistrationSubscriber();
+        final java.lang.reflect.Field indexField = EventBus.class.getDeclaredField("registeredEventIdSubMap");
+        indexField.setAccessible(true);
+        final Object eventIdIndex = indexField.get(eventBus);
+        final AtomicReference<Throwable> failure = new AtomicReference<>();
+        final Thread registering = new Thread(() -> {
+            try {
+                eventBus.register(subscriber, "concurrent");
+            } catch (Throwable e) {
+                failure.compareAndSet(null, e);
+            }
+        });
+        final List<Object> listed;
+
+        registering.setDaemon(true);
+        try {
+            synchronized (eventIdIndex) {
+                // Pause registration after its main-registry update, before its event-ID update.
+                registering.start();
+                awaitBlocked(registering);
+                listed = eventBus.subscribers("concurrent", String.class);
+                eventBus.post("concurrent", "during registration");
+            }
+        } finally {
+            registering.join(5000);
+        }
+
+        assertFalse(registering.isAlive());
+        assertNull(failure.get());
+        // A query must not list a subscriber that a post issued right after it, on the same thread, misses.
+        assertTrue(listed.isEmpty(), listed.toString());
+        assertNull(subscriber.lastEvent);
+        assertEquals(List.of(subscriber), eventBus.subscribers("concurrent", String.class));
+        eventBus.post("concurrent", "after registration");
+        assertEquals("after registration", subscriber.lastEvent);
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = { false, true })
     void post_whenCallbacksCrossPostSuppressedEvents_completesWithoutDeadlock(boolean throttle) throws Exception {
@@ -496,5 +536,30 @@ public class EventBusConcurrencyTest extends TestBase {
         }).join();
 
         assertEquals(fromPlatformThread, fromVirtualThread.get());
+    }
+
+    @Test
+    void topLevelThreadGroup_whenPlatformThreadIsInVirtualThreadGroup_skipsVirtualThreadGroup() throws Exception {
+        Method topLevelThreadGroup = EventBus.class.getDeclaredMethod("topLevelThreadGroup");
+        topLevelThreadGroup.setAccessible(true);
+        Object fromPlatformThread = topLevelThreadGroup.invoke(null);
+        AtomicReference<ThreadGroup> virtualThreadGroup = new AtomicReference<>();
+        Thread.ofVirtual().start(() -> virtualThreadGroup.set(Thread.currentThread().getThreadGroup())).join();
+        AtomicReference<Object> fromVirtualGroupMember = new AtomicReference<>();
+
+        // A platform thread created by a virtual thread, e.g. by Executors.defaultThreadFactory(), joins this group.
+        Thread member = new Thread(virtualThreadGroup.get(), () -> {
+            try {
+                fromVirtualGroupMember.set(topLevelThreadGroup.invoke(null));
+            } catch (final ReflectiveOperationException e) {
+                fromVirtualGroupMember.set(e);
+            }
+        });
+        member.setDaemon(true);
+        member.start();
+        member.join(5000);
+
+        assertFalse(member.isAlive());
+        assertEquals(fromPlatformThread, fromVirtualGroupMember.get());
     }
 }

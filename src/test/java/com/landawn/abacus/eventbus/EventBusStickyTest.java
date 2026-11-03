@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -19,6 +20,7 @@ import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import com.landawn.abacus.TestBase;
+import com.landawn.abacus.util.ThreadMode;
 
 @Tag("unit")
 public class EventBusStickyTest extends TestBase {
@@ -524,5 +526,52 @@ public class EventBusStickyTest extends TestBase {
         assertEquals(2, received.size());
         assertEquals("third", received.get(1));
         assertFalse(received.contains(removed.get()));
+    }
+
+    @Test
+    void register_whenStickyHandlerUnregistersDuringReplay_stopsReplay() {
+        eventBus.postSticky("a").postSticky("b").postSticky("c");
+        List<String> received = new ArrayList<>();
+        Object oneShot = new Object() {
+            @Subscribe(sticky = true)
+            public void on(final String event) {
+                received.add(event);
+                eventBus.unregister(this);
+            }
+        };
+
+        eventBus.register(oneShot);
+
+        // Replay order is unspecified, so only the count is fixed.
+        assertEquals(1, received.size(), received.toString());
+        assertEquals(0, eventBus.countOfSubscribers());
+    }
+
+    @Test
+    void register_whenStickyHandlerReRegistersDuringReplay_onlyReplacementFinishesReplay() {
+        EventBus bus = EventBus.create("inline", Runnable::run);
+        bus.postSticky("a").postSticky("b").postSticky("c");
+        List<String> received = new ArrayList<>();
+        Object subscriber = new Object() {
+            boolean replaced;
+
+            @Subscribe(sticky = true)
+            public void on(final String event) {
+                received.add(event);
+
+                if (!replaced) {
+                    replaced = true;
+                    // The replacement replays every retained event itself, inline, before this call returns.
+                    bus.register(this, ThreadMode.THREAD_POOL_EXECUTOR);
+                }
+            }
+        };
+
+        bus.register(subscriber);
+
+        // The first replayed event reaches both registrations; every other event only the replacement.
+        assertEquals(4, received.size(), received.toString());
+        assertEquals(2, Collections.frequency(received, received.get(0)), received.toString());
+        assertTrue(received.containsAll(List.of("a", "b", "c")), received.toString());
     }
 }

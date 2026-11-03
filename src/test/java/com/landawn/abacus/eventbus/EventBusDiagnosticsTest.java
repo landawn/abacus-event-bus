@@ -156,14 +156,51 @@ public class EventBusDiagnosticsTest extends TestBase {
             assertSame(first, filtered.get(0));
             assertEquals(2, healthy.events.size());
             assertSame(next, healthy.events.get(1));
-            assertTrue(logs.stream().anyMatch(log -> log.getThrown() == first.failure));
+            // Deduplication asks the posted event, so its equals() is the one that failed.
+            assertTrue(logs.stream().anyMatch(log -> log.getThrown() == next.failure));
 
-            first.fail = false;
+            next.fail = false;
             bus.post(next).post(next);
             queued.forEach(Runnable::run);
             assertEquals(2, filtered.size(), "Failed filtering must leave the previous accepted event intact");
             assertSame(next, filtered.get(1));
             assertEquals(4, healthy.events.size());
+        });
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = ThreadMode.class, names = { "DEFAULT", "THREAD_POOL_EXECUTOR" })
+    void post_whenEqualityThrowsError_propagatesUnloggedAndKeepsPreviousEvent(ThreadMode mode) {
+        withLogs(Level.INFO, logs -> {
+            List<Runnable> queued = new ArrayList<>();
+            EventBus bus = EventBus.create("error-equality", queued::add);
+            List<ErrorEquality> filtered = new ArrayList<>();
+            Object subscriber = new Object() {
+                @Subscribe(deduplicate = true)
+                public void onEvent(ErrorEquality event) {
+                    filtered.add(event);
+                }
+            };
+            bus.register(subscriber, mode);
+            ErrorEquality first = new ErrorEquality("first");
+            ErrorEquality next = new ErrorEquality("next");
+            next.fail = true;
+            bus.post(first);
+            queued.forEach(Runnable::run);
+            queued.clear();
+
+            assertSame(next.failure, assertThrows(AssertionError.class, () -> bus.post(next)));
+
+            assertTrue(queued.isEmpty(), "A failed equality check must not enqueue a callback");
+            assertTrue(logs.stream().noneMatch(log -> log.getThrown() == next.failure), "An Error from equals() propagates instead of being logged");
+
+            next.fail = false;
+            bus.post(next).post(next);
+            queued.forEach(Runnable::run);
+            // Had the failed attempt replaced the previous event, the first retry would be dropped as a duplicate.
+            assertEquals(2, filtered.size(), "Failed filtering must leave the previous accepted event intact");
+            assertSame(first, filtered.get(0));
+            assertSame(next, filtered.get(1));
         });
     }
 
@@ -231,6 +268,29 @@ public class EventBusDiagnosticsTest extends TestBase {
                 throw failure;
             }
             return other instanceof BrokenEquality event && value.equals(event.value);
+        }
+
+        @Override
+        public int hashCode() {
+            return value.hashCode();
+        }
+    }
+
+    private static final class ErrorEquality {
+        final String value;
+        final AssertionError failure = new AssertionError("broken event equality");
+        boolean fail;
+
+        ErrorEquality(String value) {
+            this.value = value;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (fail) {
+                throw failure;
+            }
+            return other instanceof ErrorEquality event && value.equals(event.value);
         }
 
         @Override

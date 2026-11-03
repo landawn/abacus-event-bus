@@ -200,10 +200,10 @@ public @interface Subscribe {
      * the moment the event is posted, for every {@link #threadMode()}, so it follows post spacing rather
      * than executor scheduling; a suppressed asynchronous event is never handed to the executor.
      * Accepted callbacks may overlap if a callback runs longer than the interval; a failed callback still
-     * counts as an attempt, while a submission for which {@code Executor.execute} throws before the task has begun
-     * its callback (for example a {@code RejectedExecutionException} under the default {@code AbortPolicy}) does
-     * not, because it was never delivered. An inline executor that runs the callback and only then throws still
-     * counts it. A rejection policy that silently drops the task (such as {@code DiscardPolicy} or
+     * counts as an attempt, while a submission for which {@code Executor.execute} throws (for example a
+     * {@code RejectedExecutionException} under the default {@code AbortPolicy}) does not, because it was never
+     * delivered - unless its task had already begun the callback by the time the bus handled that failure. So an
+     * inline executor that runs the callback and only then throws still counts it. A rejection policy that silently drops the task (such as {@code DiscardPolicy} or
      * {@code DiscardOldestPolicy}) looks like a successful hand-off to the bus, so the dropped event still counts.
      *
      * <p>This is useful for throttling high-frequency events to prevent overwhelming the subscriber.</p>
@@ -233,18 +233,23 @@ public @interface Subscribe {
      * Controls whether duplicate consecutive events should be ignored.
      *
      * <p>When {@code true}, an event equal to the event of this subscriber's most recently accepted delivery
-     * attempt is ignored. The check is {@code previous.equals(event)} after an identity check, so re-posting the
+     * attempt is ignored. The check is {@code event.equals(previous)} after an identity check, so re-posting the
      * same instance, even after mutating it, is always treated as a duplicate, and the handler keeps a strong
-     * reference to the last accepted event until it is unregistered. The comparison is made on
+     * reference to the last accepted event until it is unregistered. If the posted event's {@code equals()}
+     * throws, that event is not delivered to this handler and the previous event is kept, so later events are
+     * still compared against it. An exception is logged and delivery to the other handlers continues; an
+     * {@link Error} is not logged but propagates from the {@code post} call, skipping the remaining handlers.
+     * The comparison is made on
      * the posting thread at the moment the event is posted, for every {@link #threadMode()}, so "previous"
      * follows posting order, not the order in which an executor happened to run callbacks; a suppressed
      * asynchronous duplicate is never handed to the executor. An event suppressed by
      * {@link #intervalMillis()} is not accepted, so it never becomes the previous event.</p>
      *
      * <p>The comparison uses the most recently accepted delivery attempt, including one whose callback
-     * throws. An asynchronous submission for which {@code Executor.execute} throws before the task has begun its
-     * callback is not one of them: it was never delivered, so it does not become the "previous event". An inline
-     * executor that runs the callback and only then throws leaves it as the previous event, and so does a task
+     * throws. An asynchronous submission for which {@code Executor.execute} throws is not one of them, unless its
+     * task had already begun the callback by the time the bus handled that failure: it was never delivered, so it
+     * does not become the "previous event". An inline executor that runs the callback and only then throws
+     * therefore leaves it as the previous event, and so does a task
      * silently dropped by a discarding rejection policy, because {@code execute} returned normally.
      * Filtering is atomic, but distinct accepted callbacks may
      * execute concurrently.</p>

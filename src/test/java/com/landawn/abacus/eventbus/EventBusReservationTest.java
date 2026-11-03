@@ -244,7 +244,7 @@ public class EventBusReservationTest extends TestBase {
     @Test
     void reservation_whenRejected_repeatedCompletionPreservesPreviousDelivery() throws Exception {
         EventBus.SubIdentifier identifier = asyncIdentifier(new DeduplicatedHandler());
-        Method reserve = EventBus.SubIdentifier.class.getDeclaredMethod("reservePost", Object.class);
+        Method reserve = EventBus.SubIdentifier.class.getDeclaredMethod("reservePost", Object.class, boolean.class);
         reserve.setAccessible(true);
         Class<?> reservationType = reserve.getReturnType();
         Method commit = EventBus.SubIdentifier.class.getDeclaredMethod("commit", reservationType);
@@ -255,9 +255,9 @@ public class EventBusReservationTest extends TestBase {
         current.setAccessible(true);
         committed.setAccessible(true);
         rejected.setAccessible(true);
-        Object accepted = reserve.invoke(identifier, "accepted");
+        Object accepted = reserve.invoke(identifier, "accepted", false);
         commit.invoke(identifier, accepted);
-        Object failed = reserve.invoke(identifier, "rejected");
+        Object failed = reserve.invoke(identifier, "rejected", false);
 
         release.invoke(identifier, failed);
         release.invoke(identifier, failed);
@@ -269,7 +269,7 @@ public class EventBusReservationTest extends TestBase {
         assertTrue(rejected.getBoolean(failed));
         assertFalse(committed.getBoolean(failed), "A late commit must not revive a rejected reservation");
 
-        Object retry = reserve.invoke(identifier, "rejected");
+        Object retry = reserve.invoke(identifier, "rejected", false);
         commit.invoke(identifier, retry);
         assertSame(retry, current.get(identifier));
         assertEquals("rejected", identifier.previousEvent);
@@ -320,7 +320,7 @@ public class EventBusReservationTest extends TestBase {
     @Test
     void release_whenOlderSubmissionsFailWhileNewerArePending_doesNotRetainRejectedHistory() throws Exception {
         final EventBus.SubIdentifier identifier = asyncIdentifier(new DeduplicatedHandler());
-        final Method reserve = EventBus.SubIdentifier.class.getDeclaredMethod("reservePost", Object.class);
+        final Method reserve = EventBus.SubIdentifier.class.getDeclaredMethod("reservePost", Object.class, boolean.class);
         reserve.setAccessible(true);
         final Method release = EventBus.SubIdentifier.class.getDeclaredMethod("release", reserve.getReturnType());
         final java.lang.reflect.Field current = EventBus.SubIdentifier.class.getDeclaredField("currentReservation");
@@ -328,9 +328,9 @@ public class EventBusReservationTest extends TestBase {
         current.setAccessible(true);
         previous.setAccessible(true);
 
-        Object older = reserve.invoke(identifier, "event-0");
+        Object older = reserve.invoke(identifier, "event-0", false);
         for (int i = 1; i <= 64; i++) {
-            final Object newer = reserve.invoke(identifier, "event-" + i);
+            final Object newer = reserve.invoke(identifier, "event-" + i, false);
             release.invoke(identifier, older);
             older = newer;
         }
@@ -346,11 +346,37 @@ public class EventBusReservationTest extends TestBase {
     }
 
     @Test
+    void post_whenSynchronousDeliveryIsReserved_commitsWithoutHistoryThatOlderFailuresCouldRestore() throws Exception {
+        final DeduplicatedHandler subscriber = new DeduplicatedHandler();
+        final EventBus.SubIdentifier identifier = asyncIdentifier(subscriber);
+        final Method reserve = EventBus.SubIdentifier.class.getDeclaredMethod("reservePost", Object.class, boolean.class);
+        reserve.setAccessible(true);
+        final Method release = EventBus.SubIdentifier.class.getDeclaredMethod("release", reserve.getReturnType());
+        final java.lang.reflect.Field current = EventBus.SubIdentifier.class.getDeclaredField("currentReservation");
+        final java.lang.reflect.Field previous = reserve.getReturnType().getDeclaredField("previous");
+        final java.lang.reflect.Field committed = reserve.getReturnType().getDeclaredField("committed");
+        current.setAccessible(true);
+        previous.setAccessible(true);
+        committed.setAccessible(true);
+        final Object pending = reserve.invoke(identifier, "pending", false);
+
+        EventBus.create().post(identifier, "synchronous");
+
+        final Object synchronous = current.get(identifier);
+        assertTrue(committed.getBoolean(synchronous), "a synchronous attempt is permanent as soon as it is reserved");
+        assertNull(previous.get(synchronous), "a permanent reservation keeps no history");
+        release.invoke(identifier, pending);
+        assertSame(synchronous, current.get(identifier), "an older failed submission must not roll back a delivered event");
+        assertEquals("synchronous", identifier.previousEvent);
+        assertEquals(List.of("synchronous"), subscriber.received);
+    }
+
+    @Test
     void reservePost_whenEqualityMovesAcceptedTimeIntoInterval_suppressesEvent() throws Exception {
         IntervalDedupHandler subscriber = new IntervalDedupHandler();
         EventBus.SubIdentifier prototype = new EventBus.SubIdentifier(IntervalDedupHandler.class.getMethod("onEvent", Object.class));
         EventBus.SubIdentifier identifier = new EventBus.SubIdentifier(prototype, subscriber, null, ThreadMode.DEFAULT);
-        Method reserve = EventBus.SubIdentifier.class.getDeclaredMethod("reservePost", Object.class);
+        Method reserve = EventBus.SubIdentifier.class.getDeclaredMethod("reservePost", Object.class, boolean.class);
         reserve.setAccessible(true);
         Class<?> reservationType = reserve.getReturnType();
         java.lang.reflect.Field accepted = reservationType.getDeclaredField("accepted");
@@ -359,14 +385,14 @@ public class EventBusReservationTest extends TestBase {
         interval.setAccessible(true);
 
         RetimingEvent first = new RetimingEvent(identifier);
-        Object acceptedReservation = reserve.invoke(identifier, first);
+        Object acceptedReservation = reserve.invoke(identifier, first, false);
         assertTrue(accepted.getBoolean(acceptedReservation));
         assertSame(first, identifier.previousEvent);
 
         // The first check must see an expired interval. equals() then moves the accepted timestamp to now,
         // which is what the recheck after equality is there to notice.
         identifier.recordPostTime(System.nanoTime() - TimeUnit.SECONDS.toNanos(120));
-        Object suppressed = reserve.invoke(identifier, new RetimingEvent(identifier));
+        Object suppressed = reserve.invoke(identifier, new RetimingEvent(identifier), false);
 
         assertSame(interval.get(null), suppressed);
         assertFalse(accepted.getBoolean(suppressed));
@@ -491,11 +517,11 @@ public class EventBusReservationTest extends TestBase {
 
         // Use a deterministic past accepted time, avoiding real sleeps between throttled submissions.
         final long priorAcceptedTime = System.nanoTime() - TimeUnit.SECONDS.toNanos(10);
-        final Method record = EventBus.SubIdentifier.class.getDeclaredMethod("recordReservation", long.class, Object.class);
+        final Method record = EventBus.SubIdentifier.class.getDeclaredMethod("recordReservation", long.class, Object.class, boolean.class);
         record.setAccessible(true);
         final Method commit = EventBus.SubIdentifier.class.getDeclaredMethod("commit", record.getReturnType());
         synchronized (identifier) {
-            commit.invoke(identifier, record.invoke(identifier, priorAcceptedTime, "accepted"));
+            commit.invoke(identifier, record.invoke(identifier, priorAcceptedTime, "accepted", false));
         }
 
         final AtomicReference<Throwable> failure = new AtomicReference<>();

@@ -238,6 +238,34 @@ public class EventBusGenericTest extends TestBase {
         assertEquals(List.of(handler), bus.subscribers("wildcard", String.class));
     }
 
+    @ParameterizedTest
+    @MethodSource("boundedWildcardOwnerSubscribers")
+    void register_whenWildcardOwnerVariableIsBounded_routesUsingDeclaredBound(NumberOwner<?>.Handler handler, List<Object> expected) {
+        EventBus bus = EventBus.create();
+        bus.register(handler); // the declared bound reifies the event type, so no event ID is needed
+
+        bus.post(7);
+        bus.post(7.5);
+        bus.post("text");
+
+        assertEquals(expected, handler.values);
+        assertFalse(bus.hasSubscribers(String.class));
+    }
+
+    @Test
+    void register_whenWildcardOwnerVariableIsBounded_annotatedHandlerMatchesOnlyDeclaredBound() {
+        EventBus bus = EventBus.create();
+        UnboundedNumberOwnerAnnotatedHandler handler = new UnboundedNumberOwnerAnnotatedHandler(new NumberOwner<>());
+        bus.register(handler);
+
+        bus.post(7);
+        bus.post("text");
+
+        assertEquals(List.of(7), handler.values);
+        assertEquals(List.of(handler), bus.subscribers(Integer.class));
+        assertTrue(bus.subscribers(String.class).isEmpty());
+    }
+
     @Test
     void register_whenOwnerTypeIsRebound_preservesLexicalArguments() {
         final EventBus bus = EventBus.create();
@@ -279,6 +307,74 @@ public class EventBusGenericTest extends TestBase {
         bus.post("text");
         assertEquals(2, handler.values.size());
         assertTrue(handler.values.containsAll(List.of("base:7", "overload:7")));
+    }
+
+    @Test
+    void register_whenRawSubclassOverloadsHandlerOfNonPublicBase_registersBoth() {
+        // The public middle class re-declares the inherited handle(Object) as a visibility bridge, which redirects to
+        // no other declaration, so handle(Number) still only overloads it.
+        final EventBus bus = EventBus.create();
+        final RawNumberOverloadOfHiddenBase handler = new RawNumberOverloadOfHiddenBase();
+        bus.register(handler);
+        bus.post(7);
+        bus.post("text");
+        assertEquals(2, handler.values.size());
+        assertTrue(handler.values.containsAll(List.of("base:7", "overload:7")));
+    }
+
+    @Test
+    void register_whenSubclassOfNonPublicBaseOverridesHandler_deliversOnce() {
+        final EventBus bus = EventBus.create();
+        final HiddenBaseOverride handler = new HiddenBaseOverride();
+        bus.register(handler);
+        bus.post("text");
+        assertEquals(List.of("override:text"), handler.values);
+    }
+
+    @Test
+    void register_whenBoundedSubclassOfNonPublicBaseOverridesHandlerByErasure_deliversOnce() {
+        // handle(Number) overrides the inherited handle(U), whose U erases to Number, so the handle(Object) bridge
+        // leads to it; registering the inherited declaration too would invoke the override twice per event.
+        final EventBus bus = EventBus.create();
+        final BoundedHiddenBaseOverride<Integer> handler = new BoundedHiddenBaseOverride<>();
+        bus.register(handler);
+        bus.post(7);
+        bus.post("text");
+        assertEquals(List.of("override:7"), handler.values);
+    }
+
+    @Test
+    void register_whenBoundedSubclassOfNonPublicBaseOverridesSubscriberContractByErasure_deliversOnce() {
+        final EventBus bus = EventBus.create();
+        final BoundedHiddenContractOverride<Integer> handler = new BoundedHiddenContractOverride<>();
+        bus.register(handler);
+        bus.post(7);
+        bus.post("text");
+        assertEquals(List.of("override:7"), handler.values);
+    }
+
+    @Test
+    void register_whenRawSubclassOverloadsSubscriberContract_registersBoth() {
+        // Below the raw supertype on(Object) is not bridged to on(Number), so the annotated method only overloads the contract.
+        final EventBus bus = EventBus.create();
+        final RawSubscriberOverload handler = new RawSubscriberOverload();
+        bus.register(handler);
+        bus.post(7);
+        bus.post("text");
+        assertEquals(2, handler.values.size());
+        assertTrue(handler.values.containsAll(List.of("base:7", "overload:7")));
+    }
+
+    @Test
+    void register_whenSubscriberContractIsOverriddenWithAnnotation_usesOverrideOnly() {
+        // on(Object) is bridged to the annotated on(String), so the contract is that override, not a second handler.
+        final EventBus bus = EventBus.create();
+        final AnnotatedContractOverride handler = new AnnotatedContractOverride();
+        bus.register(handler);
+        bus.post("unqualified");
+        bus.post("override", "qualified");
+        assertEquals(List.of("qualified"), handler.values);
+        assertTrue(bus.subscribers(String.class).isEmpty());
     }
 
     @Test
@@ -595,6 +691,50 @@ public class EventBusGenericTest extends TestBase {
         }
     }
 
+    public static class NumberOwner<T extends Number> {
+        public class Handler implements Subscriber<T> {
+            final List<Object> values = new ArrayList<>();
+
+            @Override
+            public void on(T event) {
+                values.add(event);
+            }
+        }
+
+        public class AnnotatedHandler {
+            final List<Object> values = new ArrayList<>();
+
+            @Subscribe
+            public void handle(T event) {
+                values.add(event);
+            }
+        }
+    }
+
+    public static class UnboundedNumberOwnerHandler extends NumberOwner<?>.Handler {
+        UnboundedNumberOwnerHandler(NumberOwner<?> owner) {
+            owner.super();
+        }
+    }
+
+    public static class LowerBoundNumberOwnerHandler extends NumberOwner<? super Integer>.Handler {
+        LowerBoundNumberOwnerHandler(NumberOwner<? super Integer> owner) {
+            owner.super();
+        }
+    }
+
+    public static class UpperBoundNumberOwnerHandler extends NumberOwner<? extends Integer>.Handler {
+        UpperBoundNumberOwnerHandler(NumberOwner<? extends Integer> owner) {
+            owner.super();
+        }
+    }
+
+    public static class UnboundedNumberOwnerAnnotatedHandler extends NumberOwner<?>.AnnotatedHandler {
+        UnboundedNumberOwnerAnnotatedHandler(NumberOwner<?> owner) {
+            owner.super();
+        }
+    }
+
     public static class SwappingOwner<A, B> {
         public class Base<T> implements Subscriber<T> {
             final List<T> values = new ArrayList<>();
@@ -685,6 +825,59 @@ public class EventBusGenericTest extends TestBase {
         }
     }
 
+    static class HiddenGenericHandlerBase<T> {
+        final List<String> values = new ArrayList<>();
+
+        @Subscribe
+        public void handle(T event) {
+            values.add("base:" + event);
+        }
+    }
+
+    public static class PublicNumberHandlerMiddle<U extends Number> extends HiddenGenericHandlerBase<U> {
+    }
+
+    @SuppressWarnings("rawtypes")
+    public static class RawNumberOverloadOfHiddenBase extends PublicNumberHandlerMiddle {
+        @Subscribe
+        public void handle(Number event) {
+            values.add("overload:" + event);
+        }
+    }
+
+    public static class HiddenBaseOverride extends HiddenGenericHandlerBase<String> {
+        @Override
+        @Subscribe
+        public void handle(String event) {
+            values.add("override:" + event);
+        }
+    }
+
+    public static class BoundedHiddenBaseOverride<U extends Number> extends HiddenGenericHandlerBase<U> {
+        @Override
+        @Subscribe
+        public void handle(Number event) {
+            values.add("override:" + event);
+        }
+    }
+
+    static class HiddenGenericSubscriberBase<T> implements Subscriber<T> {
+        final List<String> values = new ArrayList<>();
+
+        @Override
+        public void on(T event) {
+            values.add("contract:" + event);
+        }
+    }
+
+    public static class BoundedHiddenContractOverride<U extends Number> extends HiddenGenericSubscriberBase<U> {
+        @Override
+        @Subscribe
+        public void on(Number event) {
+            values.add("override:" + event);
+        }
+    }
+
     public interface StaticAnnotatedHelper {
         @Subscribe
         static void helper(String event) {
@@ -722,10 +915,37 @@ public class EventBusGenericTest extends TestBase {
         }
     }
 
+    public static class NumberSubscriberMiddle<U extends Number> extends GenericSubscriberBase<U> {
+    }
+
+    public static class AnnotatedContractOverride implements Subscriber<String> {
+        final List<String> values = new ArrayList<>();
+
+        @Override
+        @Subscribe(eventId = "override")
+        public void on(String event) {
+            values.add(event);
+        }
+    }
+
+    @SuppressWarnings("rawtypes")
+    public static class RawSubscriberOverload extends NumberSubscriberMiddle {
+        @Subscribe
+        public void on(Number event) {
+            values.add("overload:" + event);
+        }
+    }
+
     private static Stream<Arguments> wildcardOwnerSubscribers() {
         return Stream.of(Arguments.of(new UpperBoundOwnerHandler(new Owner<>()), List.of("text")),
                 Arguments.of(new LowerBoundOwnerHandler(new Owner<>()), List.of("text", 42)),
                 Arguments.of(new UnboundedOwnerHandler(new Owner<>()), List.of("text", 42)));
+    }
+
+    private static Stream<Arguments> boundedWildcardOwnerSubscribers() {
+        return Stream.of(Arguments.argumentSet("NumberOwner<?>", new UnboundedNumberOwnerHandler(new NumberOwner<>()), List.of(7, 7.5)),
+                Arguments.argumentSet("NumberOwner<? super Integer>", new LowerBoundNumberOwnerHandler(new NumberOwner<>()), List.of(7, 7.5)),
+                Arguments.argumentSet("NumberOwner<? extends Integer>", new UpperBoundNumberOwnerHandler(new NumberOwner<>()), List.of(7)));
     }
 
     interface GenericHandle<T> {

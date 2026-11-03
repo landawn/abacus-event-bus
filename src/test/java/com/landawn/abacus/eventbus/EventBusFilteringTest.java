@@ -11,9 +11,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import com.landawn.abacus.TestBase;
+import com.landawn.abacus.util.ThreadMode;
 
 @Tag("unit")
 public class EventBusFilteringTest extends TestBase {
@@ -91,6 +93,44 @@ public class EventBusFilteringTest extends TestBase {
         eventBus.post("same").post("same").post("same");
 
         assertEquals(List.of("same", "same", "same"), received);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = ThreadMode.class, names = { "DEFAULT", "THREAD_POOL_EXECUTOR" })
+    void post_whenAcceptedEventEqualityThrows_keepsDeliveringLaterEvents(ThreadMode mode) {
+        EventBus bus = EventBus.create("inline", Runnable::run);
+        List<String> received = new ArrayList<>();
+        bus.register(new Object() {
+            @Subscribe(deduplicate = true)
+            public void onEvent(NullableName event) {
+                received.add(event.name);
+            }
+        }, mode);
+
+        // The posted event is asked whether it equals the previous one, so the broken equals() of the unnamed event
+        // fails only its own post; asked of the previous event instead, it would be accepted and then reject every
+        // later post.
+        bus.post(new NullableName("alice")).post(new NullableName(null)).post(new NullableName("bob")).post(new NullableName("bob"));
+
+        assertEquals(List.of("alice", "bob"), received);
+    }
+
+    private static final class NullableName {
+        final String name;
+
+        NullableName(String name) {
+            this.name = name;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof NullableName event && name.equals(event.name); // throws if this name is null
+        }
+
+        @Override
+        public int hashCode() {
+            return 0;
+        }
     }
 
     private static class ZeroIntervalSubscriber {

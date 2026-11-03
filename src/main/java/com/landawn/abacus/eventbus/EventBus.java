@@ -255,6 +255,11 @@ public class EventBus {
      */
     private volatile SubIdentifier[] noEventIdSubs = null;
 
+    /**
+     * Cached copy of {@link #stickyEventMap} for register's replay, built under that map's monitor and cleared there by
+     * every sticky mutation; {@code null} when stale. A published copy is never modified (concurrent replays iterate it
+     * without a lock) and each rebuild is a new map, which {@link #isStillRetained} relies on.
+     */
     private volatile Map<Object, String> mapOfStickyEvent = null;
 
     /**
@@ -290,8 +295,9 @@ public class EventBus {
      * A never-started, never-registered thread whose only use is {@code Runtime.removeShutdownHook(..)}: that call
      * throws {@link IllegalStateException} once the JVM has begun shutting down, which makes it the only
      * side-effect-free public way to detect shutdown ({@code addShutdownHook} throws then too, but otherwise
-     * registers the hook). Created once, so a registration constructs no thread (and so runs no application
-     * {@link InheritableThreadLocal#childValue(Object)} callback) under {@code HOOKED_EXECUTORS}.
+     * registers the hook). Created once so that a registration does not build a thread just to probe; like every
+     * thread from {@link #newShutdownHookThread}, it inherits no thread-locals, so building it runs no application
+     * {@link InheritableThreadLocal#childValue(Object)} callback.
      */
     private static final Thread SHUTDOWN_PROBE = newShutdownHookThread(() -> {
     }, "EventBus-shutdown-probe");
@@ -369,9 +375,8 @@ public class EventBus {
             try {
                 if (shutdownHookInstalled) {
                     // Without this probe, an executor supplied during shutdown (say, by another shutdown hook) would
-                    // be shut down underneath its bus by our running hook. The probe thread is pre-built: constructing
-                    // a thread here would run inherited thread-local childValue(..) callbacks under this lock, and an
-                    // IllegalStateException from one would be mistaken for shutdown, leaving the executor untracked.
+                    // be shut down underneath its bus by our running hook. The probe thread is pre-built so that each
+                    // registration does not allocate a thread merely to ask this question.
                     Runtime.getRuntime().removeShutdownHook(SHUTDOWN_PROBE);
                 } else {
                     Runtime.getRuntime().addShutdownHook(newShutdownHookThread(EventBus::shutdownTrackedExecutors, "EventBus-shutdown"));
@@ -437,15 +442,20 @@ public class EventBus {
      * retain it permanently, and with it the class loader of an application-defined {@code ThreadGroup} subclass.
      * The system group itself is avoided because a security manager guards thread creation in it.
      *
-     * @return the top-level thread group, or under a security manager the highest group whose parent may be read
+     * @return the top-level thread group, or under a security manager the first group up the hierarchy whose parent
+     *         may not be read
      */
     private static ThreadGroup topLevelThreadGroup() {
         final Thread current = Thread.currentThread();
         ThreadGroup group = current.getThreadGroup();
 
-        if (current.isVirtual()) {
+        // Android has no virtual threads, and Thread.isVirtual() exists there only from API level 36: calling it on
+        // API 34-35 would fail class initialization (SHUTDOWN_PROBE is built through here).
+        if (!IOUtil.IS_PLATFORM_ANDROID && (current.isVirtual() || isVirtualThreadGroup(group))) {
             // Every virtual thread reports the JDK's synthetic "VirtualThreads" group, a direct child of the system
-            // group, so the walk below would stop there and file platform workers and hook threads under it.
+            // group, so the walk below would stop there and file platform workers and hook threads under it. A
+            // platform thread created by a virtual thread (e.g. a pool worker from Executors.defaultThreadFactory())
+            // joins that group too, so the group itself is tested as well.
             final ThreadGroup nonVirtual = nonVirtualTopLevelGroup(group);
 
             if (nonVirtual == null) {
@@ -481,6 +491,19 @@ public class EventBus {
 
             group = parent;
         }
+    }
+
+    /**
+     * Returns whether {@code group} is the JDK's synthetic thread group of virtual threads.
+     *
+     * @param group a thread group
+     * @return {@code true} if {@code group} is the group every virtual thread reports
+     */
+    private static boolean isVirtualThreadGroup(final ThreadGroup group) {
+        // The name test keeps ordinary groups free of allocation; the identity test rejects an application group that
+        // merely shares the name. The unstarted virtual thread inherits nothing, so building it runs no application code.
+        return "VirtualThreads".equals(group.getName()) && group == Thread.ofVirtual().inheritInheritableThreadLocals(false).unstarted(() -> {
+        }).getThreadGroup();
     }
 
     /**
@@ -572,7 +595,9 @@ public class EventBus {
      * is created, gives them up to 120 seconds to drain; no hook is installed if that happens while the JVM is
      * already shutting down or while a security manager denies {@code RuntimePermission("shutdownHooks")}. Calling
      * {@link System#exit(int)} from an asynchronous subscriber therefore delays exit by that full timeout, because
-     * the hook waits for the very task that is blocked in {@code System.exit}. On Android the shared default
+     * the hook waits for the very task that is blocked in {@code System.exit}. Once that hook has shut the executor
+     * down, an asynchronous post (from another shutdown hook, say) is rejected; the
+     * {@link RejectedExecutionException} is logged and the event is not delivered to that handler. On Android the shared default
      * executor is {@code AsyncTask.THREAD_POOL_EXECUTOR}; {@code EventBus} neither configures its threads nor
      * installs a shutdown hook for it.</p>
      *
@@ -656,7 +681,8 @@ public class EventBus {
      * deliveries; keep a reference to such an executor service, or shut it down yourself, when those deliveries
      * must complete at exit. Calling {@link System#exit(int)} from a subscriber running on a registered executor
      * delays exit by the full 60 seconds, because the hook waits for the very task that is blocked in
-     * {@code System.exit}.</p>
+     * {@code System.exit}. Once the hook has shut a registered executor service down, an asynchronous post to it
+     * (from another shutdown hook, say) is normally rejected, logged and not delivered.</p>
      *
      * <p><b>Usage Examples:</b></p>
      * <pre>{@code
@@ -736,23 +762,19 @@ public class EventBus {
     public List<Object> subscribers(final String eventId, final Class<?> eventType) throws IllegalArgumentException {
         N.checkArgNotNull(eventType, cs.eventType);
 
-        final String normalizedEventId = Strings.isEmpty(eventId) ? null : eventId;
         final Class<?> matchType = wrapIfPrimitive(eventType);
-        final List<Object> eventSubs = new ArrayList<>();
+        // Answer from the snapshot a post with this ID would use, instead of scanning every registration under the
+        // registry lock: the cost follows the handlers on this ID, and the answer never lists a subscriber that a post
+        // issued right after it would miss (register updates the two indexes in separate critical sections).
+        final Set<Object> eventSubs = Collections.newSetFromMap(new IdentityHashMap<>());
 
-        synchronized (registeredSubMap) {
-            for (final Map.Entry<Object, List<SubIdentifier>> entry : registeredSubMap.entrySet()) {
-                for (final SubIdentifier sub : entry.getValue()) {
-                    if (sub.isMyEvent(normalizedEventId, matchType)) {
-                        eventSubs.add(entry.getKey());
-
-                        break;
-                    }
-                }
+        for (final SubIdentifier sub : resolveSubscribers(Strings.isEmpty(eventId) ? null : eventId)) {
+            if (sub.acceptsType(matchType)) {
+                eventSubs.add(sub.instance);
             }
         }
 
-        return eventSubs;
+        return new ArrayList<>(eventSubs);
     }
 
     /**
@@ -872,7 +894,7 @@ public class EventBus {
      * @throws IllegalArgumentException if {@code subscriber} is {@code null}, if inherited {@code @Subscribe} declarations of a handler method
      *         conflict, or if no subscriber methods are found in the subscriber class.
      * @throws RuntimeException if a {@code @Subscribe} method of the subscriber's class or a superclass is {@code static} (whatever its visibility),
-     *         or if a {@code public} {@code @Subscribe} method of the class or any supertype does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
+     *         or if a {@code public} instance {@code @Subscribe} method of the class or any supertype does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
      *         if a handler method cannot be made accessible, for example one in a non-public class whose package is in a named module not opened to this library
      * @throws IllegalStateException if the subscriber is identified as a lambda subscriber (an event ID is required for lambda subscribers)
      */
@@ -900,7 +922,7 @@ public class EventBus {
      * @throws IllegalArgumentException if {@code subscriber} is {@code null}, if inherited {@code @Subscribe} declarations of a handler method
      *         conflict, or if no subscriber methods are found in the subscriber class.
      * @throws RuntimeException if a {@code @Subscribe} method of the subscriber's class or a superclass is {@code static} (whatever its visibility),
-     *         or if a {@code public} {@code @Subscribe} method of the class or any supertype does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
+     *         or if a {@code public} instance {@code @Subscribe} method of the class or any supertype does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
      *         if a handler method cannot be made accessible, for example one in a non-public class whose package is in a named module not opened to this library
      * @throws IllegalStateException if the subscriber is identified as a lambda subscriber and {@code eventId} is empty or {@code null}
      */
@@ -926,7 +948,7 @@ public class EventBus {
      * @throws IllegalArgumentException if {@code subscriber} is {@code null}, if {@code threadMode} is not supported, if inherited {@code @Subscribe}
      *         declarations of a handler method conflict, or if no subscriber methods are found in the subscriber class.
      * @throws RuntimeException if a {@code @Subscribe} method of the subscriber's class or a superclass is {@code static} (whatever its visibility),
-     *         or if a {@code public} {@code @Subscribe} method of the class or any supertype does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
+     *         or if a {@code public} instance {@code @Subscribe} method of the class or any supertype does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
      *         if a handler method cannot be made accessible, for example one in a non-public class whose package is in a named module not opened to this library
      * @throws IllegalStateException if the subscriber is identified as a lambda subscriber (an event ID is required for lambda subscribers)
      */
@@ -945,7 +967,9 @@ public class EventBus {
      * returns. A failure delivering a replayed event is logged; an {@link Error} thrown on the registering thread
      * outside the handler (by the event's {@code equals()} while deduplicating, or by the executor) propagates after
      * the subscriber has been registered, skipping the remaining replays. A sticky event removed while this call is
-     * replaying is skipped if its turn has not yet come, but one already being replayed is still delivered.
+     * replaying is skipped if its turn has not yet come, but one already being replayed is still delivered. Likewise,
+     * the replay stops once the subscriber is unregistered or registered again (the new registration replays for
+     * itself), even when its own handler does so.
      *
      * <p>Subscriber identity is tracked by reference (an {@link IdentityHashMap}). Re-registering the
      * <em>same</em> subscriber instance <em>replaces</em> its previous registration rather than adding a second
@@ -977,7 +1001,7 @@ public class EventBus {
      * @throws IllegalArgumentException if {@code subscriber} is {@code null}, if {@code threadMode} is not supported, if inherited {@code @Subscribe}
      *         declarations of a handler method conflict, or if no subscriber methods are found in the subscriber class.
      * @throws RuntimeException if a {@code @Subscribe} method of the subscriber's class or a superclass is {@code static} (whatever its visibility),
-     *         or if a {@code public} {@code @Subscribe} method of the class or any supertype does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
+     *         or if a {@code public} instance {@code @Subscribe} method of the class or any supertype does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
      *         if a handler method cannot be made accessible, for example one in a non-public class whose package is in a named module not opened to this library
      * @throws IllegalStateException if the subscriber is identified as a lambda subscriber and {@code eventId} is empty or {@code null}
      */
@@ -1085,6 +1109,12 @@ public class EventBus {
                 if (sub.sticky) {
                     for (final Map.Entry<Object, String> entry : stickySnapshot.entrySet()) {
                         if (sub.isMyEvent(entry.getValue(), entry.getKey().getClass()) && isStillRetained(stickySnapshot, entry.getKey(), entry.getValue())) {
+                            if (!isStillRegistered(subscriber, eventSubList)) {
+                                // Unregistered or registered again - possibly by the handler just replayed to - so the
+                                // rest of this replay belongs to no registration (a replacement replays for itself).
+                                return this;
+                            }
+
                             try {
                                 dispatch(sub, entry.getKey());
                             } catch (final Exception e) {
@@ -1098,6 +1128,20 @@ public class EventBus {
         }
 
         return this;
+    }
+
+    /**
+     * Returns whether {@code registration} is still {@code subscriber}'s current registration. Every registration
+     * stores a new list, so once this returns {@code false} it never returns {@code true} again.
+     *
+     * @param subscriber the subscriber being replayed to
+     * @param registration the handler list its {@code register} call stored
+     * @return {@code true} if the subscriber has been neither unregistered nor registered again since
+     */
+    private boolean isStillRegistered(final Object subscriber, final List<SubIdentifier> registration) {
+        synchronized (registeredSubMap) {
+            return registeredSubMap.get(subscriber) == registration;
+        }
     }
 
     /**
@@ -1130,14 +1174,14 @@ public class EventBus {
      * building it on first use. The class and all of its supertypes (superclasses and interfaces) are
      * scanned for {@code public}, non-{@code static}, single-argument methods annotated with
      * {@link Subscribe}; if the class also implements {@link Subscriber}, its {@code on(...)} method is
-     * added when no annotated method with the same resolved event signature, and no annotated {@code on(Object)}
-     * override, was already found. The result is shared across all {@code EventBus} instances and is never
+     * added unless an annotated method overrides it (an annotated {@code on(Object)}, or an annotated {@code on(..)}
+     * to which {@code on(Object)} is bridged). The result is shared across all {@code EventBus} instances and is never
      * {@code null}, but may be empty.
      *
      * @param subscriberClass the subscriber class to introspect
      * @return the prototype subscriber-method descriptors for {@code subscriberClass}, possibly empty
      * @throws RuntimeException if a {@code @Subscribe} method declared by the class or a superclass is {@code static},
-     *         or if a {@code public} one declared by the class or any supertype does not declare exactly one parameter, or if a selected handler method
+     *         or if a {@code public} instance one declared by the class or any supertype does not declare exactly one parameter, or if a selected handler method
      *         cannot be made accessible
      * @throws IllegalArgumentException if equally specific inherited {@code @Subscribe} declarations of a handler method conflict
      */
@@ -1230,7 +1274,14 @@ public class EventBus {
                 // Invoke the interface contract, never an arbitrary overload named on.
                 final Method method = Subscriber.class.getMethod("on", Object.class);
                 final Class<?> eventType = eventType(method.getGenericParameterTypes()[0], typeBindings.get(Subscriber.class));
-                subscriberMethodMap.computeIfAbsent("on#" + eventType.getName(), key -> new SubIdentifier(method, eventType));
+                final String signature = "on#" + eventType.getName();
+                // An annotated on(..) with the contract's resolved type replaces the contract only if it overrides it,
+                // i.e. if on(Object) is bridged to it; below a raw supertype it merely overloads the contract, as for
+                // annotated groups above. An annotated on(Object) skipped this branch, so the erased key is free.
+                final String key = subscriberMethodMap.containsKey(signature) && !isBridged(subscriberClass, "on", Object.class)
+                        ? "erased:on#" + Object.class.getName()
+                        : signature;
+                subscriberMethodMap.computeIfAbsent(key, k -> new SubIdentifier(method, eventType));
             } catch (final NoSuchMethodException e) {
                 throw new AssertionError(e);
             }
@@ -1241,20 +1292,42 @@ public class EventBus {
 
     /**
      * Returns whether calls to the public method {@code name(erasedParameterType)} of {@code subscriberClass} are
-     * redirected by a compiler-generated bridge, i.e. whether a declaration with that erased signature is overridden
-     * by one with a more specific erased parameter type.
+     * redirected by a compiler-generated bridge to a declaration with a different erased parameter type, ignoring
+     * the visibility bridges javac adds for public methods inherited from a non-public class.
      *
      * @param subscriberClass the class whose public members are searched
      * @param name the method name
      * @param erasedParameterType the erased type of the method's single parameter
-     * @return {@code true} if the resolved public method is a bridge; {@code false} if it is not or does not exist
+     * @return {@code true} if the resolved public method is such a bridge; {@code false} if it is not or does not exist
      */
     private static boolean isBridged(final Class<?> subscriberClass, final String name, final Class<?> erasedParameterType) {
+        final Method method;
+
         try {
-            return subscriberClass.getMethod(name, erasedParameterType).isBridge();
+            method = subscriberClass.getMethod(name, erasedParameterType);
         } catch (final NoSuchMethodException e) {
             return false;
         }
+
+        if (!method.isBridge()) {
+            return false;
+        }
+
+        // A public class re-declares each public method it inherits from a non-public superclass as a bridge with the
+        // same descriptor that calls that very method, so such a bridge merges nothing. Only a bridge whose class has
+        // a same-named member with another parameter type can redirect the call to a different declaration.
+        // Known limitation: reflection cannot tell what a bridge calls, so when that class is itself the first public
+        // class below a raw supertype and declares the overload (RawChild extends raw Mid<U extends Number> extends
+        // non-public Base<T>, with handle(Number) in RawChild), its visibility bridge is taken for an override bridge
+        // and the inherited handler is dropped. Telling them apart needs the JLS override rules for raw supertypes.
+        for (final Method member : method.getDeclaringClass().getMethods()) {
+            if (member.getName().equals(name) && member.getParameterCount() == 1 && !member.isBridge() && !Modifier.isStatic(member.getModifiers())
+                    && member.getParameterTypes()[0] != erasedParameterType) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /** An annotated handler declaration and its event type resolved against the subscriber class. */
@@ -1322,6 +1395,17 @@ public class EventBus {
             bindTypeParameters(owner, bindings);
         }
         bindings.putAll(additions);
+        // Capture conversion (JLS 5.1.10) also bounds a wildcard argument by the variable's declared bound, which may
+        // name the owner's or a sibling's variables, so this runs once they are bound: for Owner<T extends Number>,
+        // Owner<?>.Handler.handle(T) handles Numbers only, and resolving T to Object routed every event to it. When
+        // the two bounds are unrelated, the declared one wins, because it is what the erased method enforces.
+        for (int i = 0; i < variables.length; i++) {
+            if (arguments[i] instanceof WildcardType) {
+                final Class<?> wildcardBound = bindings.remove(variables[i]);
+                final Class<?> declaredBound = eventType(variables[i], bindings);
+                bindings.put(variables[i], declaredBound.isAssignableFrom(wildcardBound) ? wildcardBound : declaredBound);
+            }
+        }
     }
 
     private static Class<?> eventType(final java.lang.reflect.Type type, final Map<TypeVariable<?>, Class<?>> bindings) {
@@ -1377,7 +1461,7 @@ public class EventBus {
      * @throws IllegalArgumentException if {@code subscriber} is {@code null}, if inherited {@code @Subscribe} declarations of a handler method
      *         conflict, or if no subscriber methods are found.
      * @throws RuntimeException if a {@code @Subscribe} method of the subscriber's class or a superclass is {@code static} (whatever its visibility),
-     *         or if a {@code public} {@code @Subscribe} method of the class or any supertype does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
+     *         or if a {@code public} instance {@code @Subscribe} method of the class or any supertype does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
      *         if a handler method cannot be made accessible, for example one in a non-public class whose package is in a named module not opened to this library
      * @throws IllegalStateException if the subscriber is identified as a lambda subscriber and {@code eventId} is empty or {@code null}
      */
@@ -1406,7 +1490,7 @@ public class EventBus {
      * @throws IllegalArgumentException if {@code subscriber} is {@code null}, if {@code threadMode} is not supported, if inherited {@code @Subscribe}
      *         declarations of a handler method conflict, or if no subscriber methods are found.
      * @throws RuntimeException if a {@code @Subscribe} method of the subscriber's class or a superclass is {@code static} (whatever its visibility),
-     *         or if a {@code public} {@code @Subscribe} method of the class or any supertype does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
+     *         or if a {@code public} instance {@code @Subscribe} method of the class or any supertype does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
      *         if a handler method cannot be made accessible, for example one in a non-public class whose package is in a named module not opened to this library
      * @throws IllegalStateException if the subscriber is identified as a lambda subscriber and {@code eventId} is empty or {@code null}
      */
@@ -1590,7 +1674,7 @@ public class EventBus {
 
         final String normalizedEventId = Strings.isEmpty(eventId) ? null : eventId;
 
-        dispatchToSubscribers(resolveSubscribers(normalizedEventId), normalizedEventId, event);
+        dispatchToSubscribers(resolveSubscribers(normalizedEventId), event);
 
         return this;
     }
@@ -1659,11 +1743,14 @@ public class EventBus {
      * Dispatches {@code event} to every matching handler among the previously-resolved candidates. This is
      * always called OUTSIDE {@link #stickyDeliveryLock} because {@code dispatch(...)} may execute
      * subscriber code synchronously on the calling thread.
+     *
+     * @param subscribers candidates from {@link #resolveSubscribers(String)}, all filed under the posted event ID
+     * @param event the event to dispatch
      */
-    private void dispatchToSubscribers(final SubIdentifier[] subscribers, final String normalizedEventId, final Object event) {
+    private void dispatchToSubscribers(final SubIdentifier[] subscribers, final Object event) {
         final Class<?> eventClass = event.getClass();
 
-        // resolveSubscribers only returns handlers whose effective event ID is normalizedEventId, so only the type is checked.
+        // resolveSubscribers only returns handlers filed under the posted event ID, so only the type is checked.
         for (final SubIdentifier subscriber : subscribers) {
             if (subscriber.acceptsType(eventClass)) {
                 try {
@@ -1740,7 +1827,7 @@ public class EventBus {
             subscribers = resolveSubscribers(normalizedEventId);
         }
 
-        dispatchToSubscribers(subscribers, normalizedEventId, event);
+        dispatchToSubscribers(subscribers, event);
 
         return this;
     }
@@ -1985,9 +2072,10 @@ public class EventBus {
      * handed to the executor. An accepted asynchronous event is enqueued as an invoke-only task (it does not
      * pass through {@link #post(SubIdentifier, Object)} again). Its reservation becomes permanent when
      * {@link Executor#execute(Runnable)} returns successfully or the task begins its callback, whichever
-     * happens first. If any throwable escapes {@code execute} before either point, the reservation is released
-     * so it cannot throttle or deduplicate later events; if the executor nevertheless runs that task later, the
-     * task skips the callback (a subscriber without throttling or deduplication keeps no reservation, so its task
+     * happens first. If any throwable escapes {@code execute} and the task has not begun its callback by the time
+     * this method handles it, the reservation is released so it cannot throttle or deduplicate later events (a task
+     * that begins first keeps its reservation and delivers the event, though the throwable still propagates); if the
+     * executor nevertheless runs a released task later, the task skips the callback (a subscriber without throttling or deduplication keeps no reservation, so its task
      * still runs). The original throwable propagates from this method; public posting methods log exceptions,
      * while errors propagate. (Throwables from the subscriber method itself, {@link Error}s included, never reach
      * this point: they are always caught and logged around the reflective call.) Overlapping failed submissions are removed from the reservation history regardless
@@ -2018,7 +2106,7 @@ public class EventBus {
                 // Reserve on the posting thread so the interval and the "previous event" follow post order and
                 // spacing (as documented on @Subscribe) rather than executor scheduling, and so a suppressed
                 // event is never enqueued. dispatch always runs outside every EventBus lock, as post(...) does.
-                final Reservation reservation = reserve(identifier, event);
+                final Reservation reservation = reserve(identifier, event, false);
 
                 if (reservation.accepted) {
                     try {
@@ -2084,9 +2172,9 @@ public class EventBus {
      */
     protected void post(final SubIdentifier sub, final Object event) {
         try {
-            final Reservation reservation = reserve(sub, event);
+            // A synchronous attempt can never be released, so it is committed in the critical section that reserves it.
+            final Reservation reservation = reserve(sub, event, true);
             if (reservation.accepted) {
-                sub.commit(reservation);
                 invoke(sub, event);
             }
         } catch (final Exception e) {
@@ -2100,12 +2188,14 @@ public class EventBus {
      *
      * @param sub the subscriber identifier holding the filter configuration and state
      * @param event the event being posted
+     * @param commitNow whether an accepted reservation is made permanent at once (a synchronous delivery, which can
+     *        never be released)
      * @return the reservation: {@link Reservation#accepted} tells whether the event must now be delivered, and an
-     *         accepted reservation can be handed back to {@link SubIdentifier#release(Reservation)} if the
-     *         delivery it reserved is never attempted
+     *         accepted reservation that is not yet committed can be handed back to
+     *         {@link SubIdentifier#release(Reservation)} if the delivery it reserved is never attempted
      */
-    private static Reservation reserve(final SubIdentifier sub, final Object event) {
-        final Reservation reservation = sub.intervalMillis > 0 || sub.deduplicate ? sub.reservePost(event) : Reservation.UNFILTERED;
+    private static Reservation reserve(final SubIdentifier sub, final Object event, final boolean commitNow) {
+        final Reservation reservation = sub.intervalMillis > 0 || sub.deduplicate ? sub.reservePost(event, commitNow) : Reservation.UNFILTERED;
 
         // No application code (including diagnostic toString/logging callbacks) runs under the filter monitor.
         if (reservation == Reservation.INTERVAL) {
@@ -2208,8 +2298,9 @@ public class EventBus {
         Reservation previous;
 
         /**
-         * Whether {@code execute} returned normally for this submission or its callback began. Written under the subscriber monitor,
-         * after clearing predecessor history; once true it never changes, allowing later operations to skip the monitor.
+         * Whether this reservation is permanent: a synchronous delivery's from creation, an asynchronous submission's once
+         * {@code execute} returned normally or its callback began. Written under the subscriber monitor, after clearing
+         * predecessor history; once true it never changes, allowing later operations to skip the monitor.
          */
         volatile boolean committed;
 
@@ -2271,7 +2362,7 @@ public class EventBus {
         final long intervalMillis;
 
         /**
-         * If {@code true}, an event equal to the previously accepted one ({@code previous.equals(event)}, after an
+         * If {@code true}, an event equal to the previously accepted one ({@code event.equals(previous)}, after an
          * identity check) is ignored and not delivered to the subscriber.
          */
         final boolean deduplicate;
@@ -2311,7 +2402,7 @@ public class EventBus {
         /** Latest filter state, including pending submissions; guarded by this subscriber's monitor. */
         private Reservation currentReservation;
 
-        private Reservation reservePost(final Object event) {
+        private Reservation reservePost(final Object event, final boolean commitNow) {
             for (;;) {
                 final Object previous;
                 final long version;
@@ -2321,7 +2412,7 @@ public class EventBus {
                         return Reservation.INTERVAL;
                     }
                     if (!deduplicate) {
-                        return recordReservation(now, event);
+                        return recordReservation(now, event, commitNow);
                     }
                     previous = previousEvent;
                     version = reservationVersion;
@@ -2329,7 +2420,9 @@ public class EventBus {
 
                 // equals() is application code: it may post to this or another handler. Revalidate
                 // the reservation afterward so concurrent/reentrant changes cannot admit a duplicate.
-                final boolean duplicate = previous != null && N.equals(previous, event);
+                // Ask the posted event, not the previous one: a previous event whose equals() throws would otherwise
+                // fail every later post and, never being replaced, block this handler until it is unregistered.
+                final boolean duplicate = previous != null && N.equals(event, previous);
                 synchronized (this) {
                     if (version != reservationVersion) {
                         continue;
@@ -2341,20 +2434,25 @@ public class EventBus {
                     if (duplicate) {
                         return Reservation.DUPLICATE;
                     }
-                    return recordReservation(now, event);
+                    return recordReservation(now, event, commitNow);
                 }
             }
         }
 
         /** Records an accepted filtering decision while holding this subscriber's monitor. */
-        private Reservation recordReservation(final long now, final Object event) {
+        private Reservation recordReservation(final long now, final Object event, final boolean commitNow) {
             if (intervalMillis > 0) {
                 recordPostTime(now);
             }
             if (deduplicate) {
                 previousEvent = event;
             }
-            currentReservation = new Reservation(lastPostTimeNanos, hasPosted, previousEvent, currentReservation);
+            // A reservation committed on creation keeps no history, exactly as commit(..) would discard it: once it
+            // is permanent, no older state can ever be restored.
+            currentReservation = new Reservation(lastPostTimeNanos, hasPosted, previousEvent, commitNow ? null : currentReservation);
+            if (commitNow) {
+                currentReservation.committed = true;
+            }
             reservationVersion++;
             return currentReservation;
         }
