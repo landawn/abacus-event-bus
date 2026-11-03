@@ -1,0 +1,1323 @@
+{
+  "library": {
+    "name": "abacus-event-bus",
+    "version": "1.1.1",
+    "generated_at": "2026-11-03",
+    "java_target": "21",
+    "source": {
+      "git_sha": "6115f183239876262c32c1a276a288ec8a4736eb"
+    }
+  },
+  "packages": [
+    {
+      "name": "com.landawn.abacus.eventbus",
+      "summary": "A lightweight, thread-safe publish-subscribe event system for loosely coupled components.",
+      "types": [
+        {
+          "fqn": "com.landawn.abacus.eventbus.EventBus",
+          "name": "EventBus",
+          "kind": "class",
+          "modifiers": [
+            "public"
+          ],
+          "annotations": [],
+          "javadoc_summary": "A publish-subscribe event bus that simplifies communication between components.",
+          "thread_safety": "thread-safe",
+          "nullability": "unspecified",
+          "permitted_subtypes": [],
+          "type_params": [],
+          "record_components": [],
+          "constructors": [],
+          "methods": [
+            {
+              "name": "getDefault",
+              "kind": "static",
+              "modifiers": [
+                "public",
+                "static"
+              ],
+              "annotations": [],
+              "signature": "@SuppressFBWarnings(\"MS_EXPOSE_REP\") public static EventBus getDefault()",
+              "return_type": "EventBus",
+              "type_params": [],
+              "params": [],
+              "throws": [],
+              "javadoc_summary": "Returns the default `EventBus` instance.",
+              "returns": "the default `EventBus` instance",
+              "contract": [
+                "On a standard JVM its worker threads are daemon threads: they never keep the JVM alive, and deliveries still queued when the JVM exits may be abandoned.",
+                "A shutdown hook, installed when the first default worker is created, gives them up to 120 seconds to drain; no hook is installed if that happens while the JVM is already shutting down or while a security manager denies `RuntimePermission(\"shutdownHooks\")`.",
+                "When this library is shared by several applications (a container-level library, for example), give each application's bus its own executor through #create(String, Executor) and shut that executor down when the application stops.",
+                "Conversely, a JVM shutdown hook keeps this library's own class loader reachable until exit once the default executor has created a worker or a caller-supplied executor service has been registered; an application that bundles this library and must be unloadable should deliver only synchronously or, better, use a copy of this library loaded by a shared class loader."
+              ],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "EventBus eventBus = EventBus.getDefault();\n eventBus.post(\"Hello World\");"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "create",
+              "kind": "static",
+              "modifiers": [
+                "public",
+                "static"
+              ],
+              "annotations": [],
+              "signature": "public static EventBus create()",
+              "return_type": "EventBus",
+              "type_params": [],
+              "params": [],
+              "throws": [],
+              "javadoc_summary": "Creates a new `EventBus` instance with a randomly generated identifier.",
+              "returns": "a new `EventBus` instance",
+              "contract": [],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "EventBus eventBus = EventBus.create();"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "create",
+              "kind": "static",
+              "modifiers": [
+                "public",
+                "static"
+              ],
+              "annotations": [],
+              "signature": "public static EventBus create(final String identifier)",
+              "return_type": "EventBus",
+              "type_params": [],
+              "params": [
+                {
+                  "name": "identifier",
+                  "type": "String",
+                  "javadoc": "a label for this `EventBus`, returned by #identifier(); it need not be unique and may be `null`",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [],
+              "javadoc_summary": "Creates a new `EventBus` instance with the specified identifier.",
+              "returns": "a new `EventBus` instance with the given identifier",
+              "contract": [],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "EventBus eventBus = EventBus.create(\"myEventBus\");"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "create",
+              "kind": "static",
+              "modifiers": [
+                "public",
+                "static"
+              ],
+              "annotations": [],
+              "signature": "public static EventBus create(final String identifier, final Executor executor) throws IllegalArgumentException",
+              "return_type": "EventBus",
+              "type_params": [],
+              "params": [
+                {
+                  "name": "identifier",
+                  "type": "String",
+                  "javadoc": "a label for this `EventBus`, returned by #identifier(); it need not be unique and may be `null`",
+                  "nullability": "unspecified"
+                },
+                {
+                  "name": "executor",
+                  "type": "Executor",
+                  "javadoc": "the executor to use for asynchronous event delivery; must not be `null`",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [
+                {
+                  "type": "java.lang.IllegalArgumentException",
+                  "condition": "if `executor` is `null`."
+                }
+              ],
+              "javadoc_summary": "Creates a new `EventBus` instance with the specified identifier and executor.",
+              "returns": "a new `EventBus` instance with the given identifier and executor",
+              "contract": [
+                "The executor is used for asynchronous event delivery when ThreadMode#THREAD_POOL_EXECUTOR is specified.",
+                "If the supplied executor is an ExecutorService other than the shared default executor or ForkJoinPool#commonPool(), it is registered, by identity, with a single process-wide JVM shutdown hook.",
+                "That can happen to a decorator over a pool, such as `Executors.newSingleThreadExecutor()`, while the pool behind it is still running queued deliveries; keep a reference to such an executor service, or shut it down yourself, when those deliveries must complete at exit."
+              ],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "ExecutorService executor = Executors.newFixedThreadPool(4);\n EventBus eventBus = EventBus.create(\"myEventBus\", executor);"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "identifier",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public String identifier()",
+              "return_type": "String",
+              "type_params": [],
+              "params": [],
+              "throws": [],
+              "javadoc_summary": "Returns the identifier this `EventBus` was created with.",
+              "returns": "the identifier of this `EventBus`, possibly `null`",
+              "contract": [
+                "Returns `null` if the bus was created with a `null` identifier."
+              ],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "EventBus eventBus = EventBus.create(\"myBus\");\n String id = eventBus.identifier();   // returns \"myBus\""
+              ],
+              "see_also": []
+            },
+            {
+              "name": "subscribers",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public List<Object> subscribers(final Class<?> eventType) throws IllegalArgumentException",
+              "return_type": "List<Object>",
+              "type_params": [],
+              "params": [
+                {
+                  "name": "eventType",
+                  "type": "Class<?>",
+                  "javadoc": "the event type to search for",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [
+                {
+                  "type": "java.lang.IllegalArgumentException",
+                  "condition": "if `eventType` is `null`."
+                }
+              ],
+              "javadoc_summary": "Returns the subscribers that have at least one handler with no effective event ID (neither from registration nor from its Subscribe annotation) that would receive an event whose runtime class is `eventType`.",
+              "returns": "a snapshot list of subscribers registered for the specified event type",
+              "contract": [
+                "A handler matches when its parameter type is `eventType` or a supertype of it; a `strictEventType` handler matches only its exact parameter type."
+              ],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "List<Object> subscribers = eventBus.subscribers(String.class);"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "subscribers",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public List<Object> subscribers(final String eventId, final Class<?> eventType) throws IllegalArgumentException",
+              "return_type": "List<Object>",
+              "type_params": [],
+              "params": [
+                {
+                  "name": "eventId",
+                  "type": "String",
+                  "javadoc": "the event ID to match, or `null` or empty for subscribers without an event ID",
+                  "nullability": "unspecified"
+                },
+                {
+                  "name": "eventType",
+                  "type": "Class<?>",
+                  "javadoc": "the event type to search for",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [
+                {
+                  "type": "java.lang.IllegalArgumentException",
+                  "condition": "if `eventType` is `null`."
+                }
+              ],
+              "javadoc_summary": "Returns the subscribers that have at least one handler whose effective event ID (the registration override, else the Subscribe annotation's) equals `eventId` and that would receive an event whose runtime class is `eventType`.",
+              "returns": "a snapshot list of subscribers registered for the specified event type and ID",
+              "contract": [
+                "Type matching follows #subscribers(Class): a handler matches when its parameter type is `eventType` or a supertype of it (exactly `eventType` for a `strictEventType` handler), a primitive `eventType` is treated as its wrapper class, and a lambda or method reference typed as `Subscriber<E>` itself matches every type."
+              ],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "List<Object> subscribers = eventBus.subscribers(\"textEvents\", String.class);"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "allSubscribers",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public List<Object> allSubscribers()",
+              "return_type": "List<Object>",
+              "type_params": [],
+              "params": [],
+              "throws": [],
+              "javadoc_summary": "Returns all currently registered subscribers in this `EventBus`.",
+              "returns": "a snapshot list of all currently registered subscribers",
+              "contract": [],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "List<Object> allSubscribers = eventBus.allSubscribers();"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "countOfSubscribers",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public int countOfSubscribers()",
+              "return_type": "int",
+              "type_params": [],
+              "params": [],
+              "throws": [],
+              "javadoc_summary": "Returns the number of subscribers currently registered with this `EventBus`.",
+              "returns": "the count of currently registered subscribers",
+              "contract": [],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "if (eventBus.countOfSubscribers() == 0) {\n     // no subscribers registered\n }"
+              ],
+              "see_also": [
+                "#allSubscribers()",
+                "#hasSubscribers(Class)"
+              ]
+            },
+            {
+              "name": "hasSubscribers",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public boolean hasSubscribers(final Class<?> eventType) throws IllegalArgumentException",
+              "return_type": "boolean",
+              "type_params": [],
+              "params": [
+                {
+                  "name": "eventType",
+                  "type": "Class<?>",
+                  "javadoc": "the event class to test for (must not be `null`)",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [
+                {
+                  "type": "java.lang.IllegalArgumentException",
+                  "condition": "if `eventType` is `null`."
+                }
+              ],
+              "javadoc_summary": "Checks whether any registered subscriber has a handler that accepts events of the given type, regardless of event ID.",
+              "returns": "`true` if at least one registered subscriber accepts `eventType`",
+              "contract": [
+                "A subscriber matches when one of its handlers' parameter type (that of a @Subscribe method or of its Subscriber#on(Object) implementation) is compatible with `eventType`: for a normal subscriber the parameter type must be assignable from `eventType`; for a `strictEventType` subscriber the two types must be exactly equal."
+              ],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "record OrderPlacedEvent(long orderId) {}\n // Skips building the event when no handler of any event ID accepts it. To test whether a post without an\n // event ID would reach anyone, use !eventBus.subscribers(OrderPlacedEvent.class).isEmpty() instead.\n if (eventBus.hasSubscribers(OrderPlacedEvent.class)) {\n     eventBus.post(new OrderPlacedEvent(42L));\n }"
+              ],
+              "see_also": [
+                "#countOfSubscribers()"
+              ]
+            },
+            {
+              "name": "register",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public EventBus register(final Object subscriber) throws IllegalArgumentException, RuntimeException, IllegalStateException",
+              "return_type": "EventBus",
+              "type_params": [],
+              "params": [
+                {
+                  "name": "subscriber",
+                  "type": "Object",
+                  "javadoc": "the subscriber to register",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [
+                {
+                  "type": "java.lang.IllegalArgumentException",
+                  "condition": "if `subscriber` is `null`, if inherited `@Subscribe` declarations of a handler method conflict, or if no subscriber methods are found in the subscriber class."
+                },
+                {
+                  "type": "java.lang.RuntimeException",
+                  "condition": "if a `@Subscribe` method of the subscriber's class or a superclass is `static` (whatever its visibility), or if a `public` instance `@Subscribe` method of the class or any supertype does not declare exactly one parameter, or (java.lang.reflect.InaccessibleObjectException) if a handler method cannot be made accessible, for example one in a non-public class whose package is in a named module not opened to this library"
+                },
+                {
+                  "type": "java.lang.IllegalStateException",
+                  "condition": "if the subscriber is identified as a lambda subscriber (an event ID is required for lambda subscribers)"
+                }
+              ],
+              "javadoc_summary": "Registers a subscriber to receive events.",
+              "returns": "this `EventBus` instance for method chaining",
+              "contract": [
+                "The subscriber must either implement the Subscriber interface or have methods annotated with Subscribe."
+              ],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "eventBus.register(new Subscriber<String>() {\n     @Override\n     public void on(String event) {\n         System.out.println(\"Received: \" + event);\n     }\n });"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "register",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public EventBus register(final Object subscriber, final String eventId) throws IllegalArgumentException, RuntimeException, IllegalStateException",
+              "return_type": "EventBus",
+              "type_params": [],
+              "params": [
+                {
+                  "name": "subscriber",
+                  "type": "Object",
+                  "javadoc": "the subscriber to register",
+                  "nullability": "unspecified"
+                },
+                {
+                  "name": "eventId",
+                  "type": "String",
+                  "javadoc": "the event ID override, or `null` or empty to keep each handler's annotation-level event ID; must be non-empty for lambda-based subscribers",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [
+                {
+                  "type": "java.lang.IllegalArgumentException",
+                  "condition": "if `subscriber` is `null`, if inherited `@Subscribe` declarations of a handler method conflict, or if no subscriber methods are found in the subscriber class."
+                },
+                {
+                  "type": "java.lang.RuntimeException",
+                  "condition": "if a `@Subscribe` method of the subscriber's class or a superclass is `static` (whatever its visibility), or if a `public` instance `@Subscribe` method of the class or any supertype does not declare exactly one parameter, or (java.lang.reflect.InaccessibleObjectException) if a handler method cannot be made accessible, for example one in a non-public class whose package is in a named module not opened to this library"
+                },
+                {
+                  "type": "java.lang.IllegalStateException",
+                  "condition": "if the subscriber is identified as a lambda subscriber and `eventId` is empty or `null`"
+                }
+              ],
+              "javadoc_summary": "Registers a subscriber with an optional event ID override.",
+              "returns": "this `EventBus` instance for method chaining",
+              "contract": [
+                "When `eventId` is non-empty, every handler of the subscriber, including handlers whose Subscribe annotation declares a different event ID, receives only events posted with that ID.",
+                "When `eventId` is `null` or empty, each handler keeps its annotation-level event ID, or no ID if none is declared, as with #register(Object)."
+              ],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "eventBus.register(mySubscriber, \"userEvents\");\n // This subscriber will only receive events posted with \"userEvents\" ID"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "register",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public EventBus register(final Object subscriber, final ThreadMode threadMode) throws IllegalArgumentException, RuntimeException, IllegalStateException",
+              "return_type": "EventBus",
+              "type_params": [],
+              "params": [
+                {
+                  "name": "subscriber",
+                  "type": "Object",
+                  "javadoc": "the subscriber to register",
+                  "nullability": "unspecified"
+                },
+                {
+                  "name": "threadMode",
+                  "type": "ThreadMode",
+                  "javadoc": "the thread mode override for event delivery, or `null` to use the thread mode declared in each subscriber method's Subscribe annotation",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [
+                {
+                  "type": "java.lang.IllegalArgumentException",
+                  "condition": "if `subscriber` is `null`, if `threadMode` is not supported, if inherited `@Subscribe` declarations of a handler method conflict, or if no subscriber methods are found in the subscriber class."
+                },
+                {
+                  "type": "java.lang.RuntimeException",
+                  "condition": "if a `@Subscribe` method of the subscriber's class or a superclass is `static` (whatever its visibility), or if a `public` instance `@Subscribe` method of the class or any supertype does not declare exactly one parameter, or (java.lang.reflect.InaccessibleObjectException) if a handler method cannot be made accessible, for example one in a non-public class whose package is in a named module not opened to this library"
+                },
+                {
+                  "type": "java.lang.IllegalStateException",
+                  "condition": "if the subscriber is identified as a lambda subscriber (an event ID is required for lambda subscribers)"
+                }
+              ],
+              "javadoc_summary": "Registers a subscriber with a specific thread mode.",
+              "returns": "this `EventBus` instance for method chaining",
+              "contract": [],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "eventBus.register(mySubscriber, ThreadMode.THREAD_POOL_EXECUTOR);\n // Events will be delivered on a background thread"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "register",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public EventBus register(final Object subscriber, final String eventId, final ThreadMode threadMode) throws IllegalArgumentException, RuntimeException, IllegalStateException",
+              "return_type": "EventBus",
+              "type_params": [],
+              "params": [
+                {
+                  "name": "subscriber",
+                  "type": "Object",
+                  "javadoc": "the subscriber to register",
+                  "nullability": "unspecified"
+                },
+                {
+                  "name": "eventId",
+                  "type": "String",
+                  "javadoc": "the event ID override; must be non-empty for lambda-based subscribers; `null` or empty preserves each handler's annotation-level event ID (or no ID if none is declared)",
+                  "nullability": "unspecified"
+                },
+                {
+                  "name": "threadMode",
+                  "type": "ThreadMode",
+                  "javadoc": "the thread mode override for event delivery, or `null` to use the thread mode declared in each subscriber method's Subscribe annotation",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [
+                {
+                  "type": "java.lang.IllegalArgumentException",
+                  "condition": "if `subscriber` is `null`, if `threadMode` is not supported, if inherited `@Subscribe` declarations of a handler method conflict, or if no subscriber methods are found in the subscriber class."
+                },
+                {
+                  "type": "java.lang.RuntimeException",
+                  "condition": "if a `@Subscribe` method of the subscriber's class or a superclass is `static` (whatever its visibility), or if a `public` instance `@Subscribe` method of the class or any supertype does not declare exactly one parameter, or (java.lang.reflect.InaccessibleObjectException) if a handler method cannot be made accessible, for example one in a non-public class whose package is in a named module not opened to this library"
+                },
+                {
+                  "type": "java.lang.IllegalStateException",
+                  "condition": "if the subscriber is identified as a lambda subscriber and `eventId` is empty or `null`"
+                }
+              ],
+              "javadoc_summary": "Registers a subscriber with both event ID and thread mode specifications.",
+              "returns": "this `EventBus` instance for method chaining",
+              "contract": [
+                "If the subscriber has sticky event handling enabled, it will immediately receive any matching sticky events; delivery of those sticky events respects each handler's effective ThreadMode (the registration override if given, otherwise the annotation's), so a `THREAD_POOL_EXECUTOR` sticky delivery is handed to this bus's executor: with the default executor it runs on a background thread, but a caller-supplied direct executor (such as `Runnable::run`) runs it on the registering thread before `register` returns.",
+                "A sticky event removed while this call is replaying is skipped if its turn has not yet come, but one already being replayed is still delivered.",
+                "Likewise, the replay stops once the subscriber is unregistered or registered again (the new registration replays for itself), even when its own handler does so."
+              ],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "eventBus.register(mySubscriber, \"userEvents\", ThreadMode.THREAD_POOL_EXECUTOR);"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "register",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public EventBus register(final Subscriber<?> subscriber, final String eventId) throws IllegalArgumentException, RuntimeException, IllegalStateException",
+              "return_type": "EventBus",
+              "type_params": [],
+              "params": [
+                {
+                  "name": "subscriber",
+                  "type": "Subscriber<?>",
+                  "javadoc": "the `Subscriber` implementation to register",
+                  "nullability": "unspecified"
+                },
+                {
+                  "name": "eventId",
+                  "type": "String",
+                  "javadoc": "the event ID to filter events; must be non-empty when the subscriber is identified as a lambda subscriber",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [
+                {
+                  "type": "java.lang.IllegalArgumentException",
+                  "condition": "if `subscriber` is `null`, if inherited `@Subscribe` declarations of a handler method conflict, or if no subscriber methods are found."
+                },
+                {
+                  "type": "java.lang.RuntimeException",
+                  "condition": "if a `@Subscribe` method of the subscriber's class or a superclass is `static` (whatever its visibility), or if a `public` instance `@Subscribe` method of the class or any supertype does not declare exactly one parameter, or (java.lang.reflect.InaccessibleObjectException) if a handler method cannot be made accessible, for example one in a non-public class whose package is in a named module not opened to this library"
+                },
+                {
+                  "type": "java.lang.IllegalStateException",
+                  "condition": "if the subscriber is identified as a lambda subscriber and `eventId` is empty or `null`"
+                }
+              ],
+              "javadoc_summary": "Registers a Subscriber interface implementation with a specific event ID.",
+              "returns": "this `EventBus` instance for method chaining",
+              "contract": [],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "eventBus.register((Subscriber<String>) event -> {\n     System.out.println(\"Lambda received: \" + event);\n }, \"stringEvents\");"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "register",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public EventBus register(final Subscriber<?> subscriber, final String eventId, final ThreadMode threadMode) throws IllegalArgumentException, RuntimeException, IllegalStateException",
+              "return_type": "EventBus",
+              "type_params": [],
+              "params": [
+                {
+                  "name": "subscriber",
+                  "type": "Subscriber<?>",
+                  "javadoc": "the `Subscriber` implementation to register",
+                  "nullability": "unspecified"
+                },
+                {
+                  "name": "eventId",
+                  "type": "String",
+                  "javadoc": "the event ID to filter events; must be non-empty when the subscriber is identified as a lambda subscriber",
+                  "nullability": "unspecified"
+                },
+                {
+                  "name": "threadMode",
+                  "type": "ThreadMode",
+                  "javadoc": "the thread mode override for event delivery, or `null` to use the thread mode declared in each subscriber method's Subscribe annotation",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [
+                {
+                  "type": "java.lang.IllegalArgumentException",
+                  "condition": "if `subscriber` is `null`, if `threadMode` is not supported, if inherited `@Subscribe` declarations of a handler method conflict, or if no subscriber methods are found."
+                },
+                {
+                  "type": "java.lang.RuntimeException",
+                  "condition": "if a `@Subscribe` method of the subscriber's class or a superclass is `static` (whatever its visibility), or if a `public` instance `@Subscribe` method of the class or any supertype does not declare exactly one parameter, or (java.lang.reflect.InaccessibleObjectException) if a handler method cannot be made accessible, for example one in a non-public class whose package is in a named module not opened to this library"
+                },
+                {
+                  "type": "java.lang.IllegalStateException",
+                  "condition": "if the subscriber is identified as a lambda subscriber and `eventId` is empty or `null`"
+                }
+              ],
+              "javadoc_summary": "Registers a Subscriber interface implementation with both event ID and thread mode.",
+              "returns": "this `EventBus` instance for method chaining",
+              "contract": [],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "eventBus.register((Subscriber<User>) user -> {\n     // Process user on background thread\n     processUser(user);\n }, \"userUpdates\", ThreadMode.THREAD_POOL_EXECUTOR);"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "unregister",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public EventBus unregister(final Object subscriber)",
+              "return_type": "EventBus",
+              "type_params": [],
+              "params": [
+                {
+                  "name": "subscriber",
+                  "type": "Object",
+                  "javadoc": "the subscriber to unregister",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [],
+              "javadoc_summary": "Unregisters a previously registered subscriber.",
+              "returns": "this `EventBus` instance for method chaining",
+              "contract": [
+                "This method should be called when a subscriber is no longer needed to prevent memory leaks.",
+                "If the subscriber was not previously registered, this method does nothing."
+              ],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "eventBus.unregister(mySubscriber);\n // Future posts will not select mySubscriber; deliveries already queued may still run."
+              ],
+              "see_also": []
+            },
+            {
+              "name": "post",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public EventBus post(final Object event) throws IllegalArgumentException",
+              "return_type": "EventBus",
+              "type_params": [],
+              "params": [
+                {
+                  "name": "event",
+                  "type": "Object",
+                  "javadoc": "the event to post",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [
+                {
+                  "type": "java.lang.IllegalArgumentException",
+                  "condition": "if `event` is `null`."
+                }
+              ],
+              "javadoc_summary": "Posts an event to subscribers that have no event ID filter.",
+              "returns": "this `EventBus` instance for method chaining",
+              "contract": [],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "eventBus.post(\"Hello World\");\n eventBus.post(new UserLoginEvent(userId));"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "post",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public EventBus post(final String eventId, final Object event) throws IllegalArgumentException",
+              "return_type": "EventBus",
+              "type_params": [],
+              "params": [
+                {
+                  "name": "eventId",
+                  "type": "String",
+                  "javadoc": "the event ID for filtering subscribers, or `null` (or empty) to deliver to subscribers without a specific event ID",
+                  "nullability": "unspecified"
+                },
+                {
+                  "name": "event",
+                  "type": "Object",
+                  "javadoc": "the event to post",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [
+                {
+                  "type": "java.lang.IllegalArgumentException",
+                  "condition": "if `event` is `null`."
+                }
+              ],
+              "javadoc_summary": "Posts an event with an optional event ID.",
+              "returns": "this `EventBus` instance for method chaining",
+              "contract": [
+                "When `eventId` is non-`null` and non-empty, the event is delivered only to handlers whose effective event ID equals it: handlers of subscribers registered with that event ID, and handlers whose Subscribe#eventId() specifies it when their subscriber was registered without an event ID (a registration-time event ID replaces the annotation's).",
+                "The handler must also accept the event's runtime type (exactly, for a `strictEventType` handler).",
+                "When `eventId` is `null` or empty, the event is delivered to all subscribers that have no event ID filter (equivalent to calling #post(Object))."
+              ],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "eventBus.post(\"userEvents\", new UserLoginEvent(userId));\n // Only subscribers associated with \"userEvents\" will receive this"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "postSticky",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public EventBus postSticky(final Object event) throws IllegalArgumentException",
+              "return_type": "EventBus",
+              "type_params": [],
+              "params": [
+                {
+                  "name": "event",
+                  "type": "Object",
+                  "javadoc": "the sticky event to post",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [
+                {
+                  "type": "java.lang.IllegalArgumentException",
+                  "condition": "if `event` is `null`."
+                }
+              ],
+              "javadoc_summary": "Posts a sticky event without an event ID.",
+              "returns": "this `EventBus` instance for method chaining",
+              "contract": [],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "eventBus.postSticky(new AppConfiguration());\n // Later registered subscribers with sticky=true will receive this event"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "postSticky",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public EventBus postSticky(final String eventId, final Object event) throws IllegalArgumentException",
+              "return_type": "EventBus",
+              "type_params": [],
+              "params": [
+                {
+                  "name": "eventId",
+                  "type": "String",
+                  "javadoc": "the event ID to associate with the sticky event, or `null` (or empty) to retain it without a specific event ID",
+                  "nullability": "unspecified"
+                },
+                {
+                  "name": "event",
+                  "type": "Object",
+                  "javadoc": "the sticky event to post",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [
+                {
+                  "type": "java.lang.IllegalArgumentException",
+                  "condition": "if `event` is `null`."
+                }
+              ],
+              "javadoc_summary": "Posts a sticky event with a specific event ID.",
+              "returns": "this `EventBus` instance for method chaining",
+              "contract": [
+                "When several retained sticky events match a newly registering sticky subscriber, the order in which they are replayed to it is unspecified."
+              ],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "Configuration config = new Configuration();\n eventBus.postSticky(\"appConfig\", config);\n // Future subscribers for \"appConfig\" with sticky=true will receive this"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "removeStickyEvent",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public boolean removeStickyEvent(final Object event)",
+              "return_type": "boolean",
+              "type_params": [],
+              "params": [
+                {
+                  "name": "event",
+                  "type": "Object",
+                  "javadoc": "the sticky event to remove",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [],
+              "javadoc_summary": "Removes `event` if that exact instance (`==`, not `equals()`) is currently retained without an event ID; subscribers that register after this call returns will no longer receive it (a replay already handing it to a subscriber may still complete).",
+              "returns": "`true` if the event was removed, `false` otherwise",
+              "contract": [],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "Configuration config = getConfiguration();\n boolean removed = eventBus.removeStickyEvent(config);"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "removeStickyEvent",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public boolean removeStickyEvent(final String eventId, final Object event)",
+              "return_type": "boolean",
+              "type_params": [],
+              "params": [
+                {
+                  "name": "eventId",
+                  "type": "String",
+                  "javadoc": "the event ID the sticky event was posted with, or `null` or empty for no event ID",
+                  "nullability": "unspecified"
+                },
+                {
+                  "name": "event",
+                  "type": "Object",
+                  "javadoc": "the sticky event to remove",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [],
+              "javadoc_summary": "Removes `event` if that exact instance (`==`, not `equals()`) is currently retained under `eventId` (`null` or empty meaning no event ID).",
+              "returns": "`true` if the event was removed, `false` otherwise",
+              "contract": [],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "Configuration config = getConfiguration();\n boolean removed = eventBus.removeStickyEvent(\"appConfig\", config);"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "removeStickyEvents",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public boolean removeStickyEvents(final Class<?> eventType) throws IllegalArgumentException",
+              "return_type": "boolean",
+              "type_params": [],
+              "params": [
+                {
+                  "name": "eventType",
+                  "type": "Class<?>",
+                  "javadoc": "the type, or a supertype, of the sticky events to remove; a primitive class matches its wrapper type",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [
+                {
+                  "type": "java.lang.IllegalArgumentException",
+                  "condition": "if `eventType` is `null`."
+                }
+              ],
+              "javadoc_summary": "Removes every sticky event retained without an event ID whose runtime class is `eventType` or a subtype of it, matching #stickyEvents(Class).",
+              "returns": "`true` if one or more events were removed, `false` otherwise",
+              "contract": [],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "boolean removed = eventBus.removeStickyEvents(UserSession.class);\n // All UserSession (and UserSession subclass) sticky events with no event ID are removed"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "removeStickyEvents",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public boolean removeStickyEvents(final String eventId, final Class<?> eventType) throws IllegalArgumentException",
+              "return_type": "boolean",
+              "type_params": [],
+              "params": [
+                {
+                  "name": "eventId",
+                  "type": "String",
+                  "javadoc": "the event ID to match, or `null` or empty for events retained without an event ID",
+                  "nullability": "unspecified"
+                },
+                {
+                  "name": "eventType",
+                  "type": "Class<?>",
+                  "javadoc": "the type, or a supertype, of the sticky events to remove; a primitive class matches its wrapper type",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [
+                {
+                  "type": "java.lang.IllegalArgumentException",
+                  "condition": "if `eventType` is `null`."
+                }
+              ],
+              "javadoc_summary": "Removes every sticky event retained under `eventId` whose runtime class is `eventType` or a subtype of it, matching #stickyEvents(String, Class); `Object.class` removes every sticky event retained under that ID.",
+              "returns": "`true` if one or more events were removed, `false` otherwise",
+              "contract": [],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "boolean removed = eventBus.removeStickyEvents(\"userSessions\", UserSession.class);\n // All UserSession (and UserSession subclass) sticky events with the \"userSessions\" ID are removed"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "removeAllStickyEvents",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public boolean removeAllStickyEvents()",
+              "return_type": "boolean",
+              "type_params": [],
+              "params": [],
+              "throws": [],
+              "javadoc_summary": "Removes all sticky events from this `EventBus`.",
+              "returns": "`true` if one or more sticky events were removed, `false` if there were no sticky events to remove. The return type mirrors #removeStickyEvent(Object) and #removeStickyEvents(Class) for family consistency.",
+              "contract": [],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "boolean removed = eventBus.removeAllStickyEvents();\n // All sticky events are cleared"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "stickyEvents",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public <T> List<T> stickyEvents(final Class<T> eventType) throws IllegalArgumentException",
+              "return_type": "List<T>",
+              "type_params": [
+                {
+                  "name": "T",
+                  "bounds": [
+                    "java.lang.Object"
+                  ]
+                }
+              ],
+              "params": [
+                {
+                  "name": "eventType",
+                  "type": "Class<T>",
+                  "javadoc": "the class type to search for; a primitive class matches its wrapper type",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [
+                {
+                  "type": "java.lang.IllegalArgumentException",
+                  "condition": "if `eventType` is `null`."
+                }
+              ],
+              "javadoc_summary": "Returns all sticky events of a specific type that were posted without an event ID.",
+              "returns": "a list, in unspecified order, of sticky events that can be assigned to the specified type",
+              "contract": [],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "List<Configuration> configs = eventBus.stickyEvents(Configuration.class);\n for (Configuration config : configs) {\n     processConfig(config);\n }"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "stickyEvents",
+              "kind": "instance",
+              "modifiers": [
+                "public"
+              ],
+              "annotations": [],
+              "signature": "public <T> List<T> stickyEvents(final String eventId, final Class<T> eventType) throws IllegalArgumentException",
+              "return_type": "List<T>",
+              "type_params": [
+                {
+                  "name": "T",
+                  "bounds": [
+                    "java.lang.Object"
+                  ]
+                }
+              ],
+              "params": [
+                {
+                  "name": "eventId",
+                  "type": "String",
+                  "javadoc": "the event ID to match, or `null` or empty for events retained without an event ID",
+                  "nullability": "unspecified"
+                },
+                {
+                  "name": "eventType",
+                  "type": "Class<T>",
+                  "javadoc": "the class type to search for; a primitive class matches its wrapper type",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [
+                {
+                  "type": "java.lang.IllegalArgumentException",
+                  "condition": "if `eventType` is `null`."
+                }
+              ],
+              "javadoc_summary": "Returns all sticky events of a specific type that were posted with the specified event ID.",
+              "returns": "a list, in unspecified order, of sticky events matching both the type and event ID",
+              "contract": [],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "List<Configuration> userConfigs = eventBus.stickyEvents(\"userConfig\", Configuration.class);"
+              ],
+              "see_also": []
+            }
+          ],
+          "fields": [],
+          "api_notes": [],
+          "implementation_notes": []
+        },
+        {
+          "fqn": "com.landawn.abacus.eventbus.Subscribe",
+          "name": "Subscribe",
+          "kind": "annotation",
+          "modifiers": [
+            "public",
+            "abstract"
+          ],
+          "annotations": [],
+          "javadoc_summary": "Marks a method as an event subscriber in the EventBus system.",
+          "thread_safety": "unspecified",
+          "nullability": "unspecified",
+          "permitted_subtypes": [],
+          "type_params": [],
+          "record_components": [],
+          "constructors": [],
+          "methods": [
+            {
+              "name": "threadMode",
+              "kind": "instance",
+              "modifiers": [
+                "public",
+                "abstract"
+              ],
+              "annotations": [],
+              "signature": "ThreadMode threadMode() default ThreadMode.DEFAULT",
+              "return_type": "ThreadMode",
+              "type_params": [],
+              "params": [],
+              "throws": [],
+              "javadoc_summary": "Specifies the thread mode for event delivery.",
+              "returns": "the thread mode for event delivery",
+              "contract": [],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "@Subscribe(threadMode = ThreadMode.THREAD_POOL_EXECUTOR)\n public void onHeavyEvent(DataEvent event) {\n     // Runs on the bus executor (a background thread with the default executor)\n     performExpensiveOperation(event.getData());\n }"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "strictEventType",
+              "kind": "instance",
+              "modifiers": [
+                "public",
+                "abstract"
+              ],
+              "annotations": [],
+              "signature": "boolean strictEventType() default false",
+              "return_type": "boolean",
+              "type_params": [],
+              "params": [],
+              "throws": [],
+              "javadoc_summary": "Controls whether the subscriber accepts only exact event type matches or includes subtypes.",
+              "returns": "`true` to accept only exact type matches, `false` to accept subtypes",
+              "contract": [
+                "When set to `true`, only events of the exact parameter type will be delivered.",
+                "When `false` (default), events of the parameter type and all its subtypes will be delivered."
+              ],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "// With strictEventType = false (default)\n @Subscribe\n public void onAnimal(Animal event) {\n     // Receives Animal, Dog, Cat, etc.\n }\n\n // With strictEventType = true\n @Subscribe(strictEventType = true)\n public void onAnimalOnly(Animal event) {\n     // Receives only Animal, not Dog or Cat\n }"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "sticky",
+              "kind": "instance",
+              "modifiers": [
+                "public",
+                "abstract"
+              ],
+              "annotations": [],
+              "signature": "boolean sticky() default false",
+              "return_type": "boolean",
+              "type_params": [],
+              "params": [],
+              "throws": [],
+              "javadoc_summary": "Indicates whether this subscriber should receive previously posted sticky events upon registration.",
+              "returns": "`true` to receive sticky events upon registration",
+              "contract": [
+                "When `true`, every retained sticky event matching this subscriber's type and effective event ID is dispatched to this subscriber during registration, in its thread mode.",
+                "Replayed events pass through the same #intervalMillis() and #deduplicate() filters as posted events, so when either is enabled some matching retained events may be suppressed.",
+                "When several retained sticky events match, the order in which they are replayed is unspecified."
+              ],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "class ConfigHandler {\n     @Subscribe(sticky = true)\n     public void onConfig(AppConfig config) {\n         // This will be called immediately with the sticky config\n         applyConfiguration(config);\n     }\n }\n\n // Post a sticky configuration, then register the annotated subscriber.\n eventBus.postSticky(new AppConfig(\"production\"));\n eventBus.register(new ConfigHandler());"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "eventId",
+              "kind": "instance",
+              "modifiers": [
+                "public",
+                "abstract"
+              ],
+              "annotations": [],
+              "signature": "String eventId() default \"\"",
+              "return_type": "String",
+              "type_params": [],
+              "params": [],
+              "throws": [],
+              "javadoc_summary": "Specifies an event ID to filter incoming events.",
+              "returns": "the event ID to filter on, or an empty string to match events posted without an event ID",
+              "contract": [
+                "If empty (default) and no registration-level event ID is supplied, the subscriber receives only events posted without an event ID, matched by type."
+              ],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "@Subscribe(eventId = \"userUpdates\")\n public void onUserUpdate(User user) {\n     // Only receives User events posted with \"userUpdates\" ID\n }\n\n @Subscribe(eventId = \"adminUpdates\")\n public void onAdminUpdate(User user) {\n     // Only receives User events posted with \"adminUpdates\" ID\n }"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "intervalMillis",
+              "kind": "instance",
+              "modifiers": [
+                "public",
+                "abstract"
+              ],
+              "annotations": [],
+              "signature": "long intervalMillis() default 0",
+              "return_type": "long",
+              "type_params": [],
+              "params": [],
+              "throws": [],
+              "javadoc_summary": "Specifies the minimum time interval (in milliseconds) between accepted delivery attempts.",
+              "returns": "the minimum interval between accepted attempts in milliseconds; any value `<= 0` disables throttling",
+              "contract": [
+                "Accepted callbacks may overlap if a callback runs longer than the interval; a failed callback still counts as an attempt, while a submission for which `Executor.execute` throws (for example a `RejectedExecutionException` under the default `AbortPolicy`) does not, because it was never delivered - unless its task had already begun the callback by the time the bus handled that failure.",
+                "Any value `<= 0` is likewise treated as \"no throttling\": the `EventBus` delivery guard only throttles when the interval is strictly positive, so a negative interval has the same effect as `0`."
+              ],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "@Subscribe(intervalMillis = 1000)  // keeps at most one event per second\n public void onSensorData(SensorEvent event) {\n     updateDisplay(event.getValue());\n }\n\n @Subscribe(intervalMillis = 5000)  // keeps at most one event per 5 seconds\n public void onLocationUpdate(Location location) {\n     saveLocationToServer(location);\n }"
+              ],
+              "see_also": []
+            },
+            {
+              "name": "deduplicate",
+              "kind": "instance",
+              "modifiers": [
+                "public",
+                "abstract"
+              ],
+              "annotations": [],
+              "signature": "boolean deduplicate() default false",
+              "return_type": "boolean",
+              "type_params": [],
+              "params": [],
+              "throws": [],
+              "javadoc_summary": "Controls whether duplicate consecutive events should be ignored.",
+              "returns": "`true` to ignore duplicate consecutive events",
+              "contract": [
+                "When `true`, an event equal to the event of this subscriber's most recently accepted delivery attempt is ignored.",
+                "If the posted event's `equals()` throws, that event is not delivered to this handler and the previous event is kept, so later events are still compared against it."
+              ],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [
+                "@Subscribe(deduplicate = true)\n public void onTemperature(Temperature temp) {\n     // If temperature hasn't changed, event is ignored\n     updateThermostat(temp.getValue());\n }\n\n @Subscribe(deduplicate = true)\n public void onConfigChange(Config config) {\n     // Only processes when configuration actually changes\n     applyNewConfiguration(config);\n }"
+              ],
+              "see_also": []
+            }
+          ],
+          "fields": [],
+          "api_notes": [],
+          "implementation_notes": []
+        },
+        {
+          "fqn": "com.landawn.abacus.eventbus.Subscriber",
+          "name": "Subscriber",
+          "kind": "interface",
+          "modifiers": [
+            "public",
+            "abstract"
+          ],
+          "annotations": [],
+          "javadoc_summary": "A functional interface for implementing event subscribers in the EventBus system.",
+          "thread_safety": "unspecified",
+          "nullability": "unspecified",
+          "permitted_subtypes": [],
+          "type_params": [
+            {
+              "name": "E",
+              "bounds": [
+                "java.lang.Object"
+              ]
+            }
+          ],
+          "record_components": [],
+          "constructors": [],
+          "methods": [
+            {
+              "name": "on",
+              "kind": "instance",
+              "modifiers": [
+                "public",
+                "abstract"
+              ],
+              "annotations": [],
+              "signature": "void on(E event)",
+              "return_type": "void",
+              "type_params": [],
+              "params": [
+                {
+                  "name": "event",
+                  "type": "E",
+                  "javadoc": "the event instance posted to the `EventBus`; never `null` when the `EventBus` invokes this method, because the bus rejects `null` events (direct callers are not bound by that guarantee)",
+                  "nullability": "unspecified"
+                }
+              ],
+              "throws": [],
+              "javadoc_summary": "Called when a matching event is posted to the EventBus; see the class description for how `E` is matched (a lambda typed as `Subscriber<E>` itself receives every event posted with its event ID, whatever its type).",
+              "contract": [
+                "Implementations should handle the event and should avoid throwing unchecked exceptions."
+              ],
+              "api_notes": [],
+              "implementation_notes": [],
+              "examples": [],
+              "see_also": []
+            }
+          ],
+          "fields": [],
+          "api_notes": [],
+          "implementation_notes": []
+        }
+      ]
+    }
+  ]
+}
