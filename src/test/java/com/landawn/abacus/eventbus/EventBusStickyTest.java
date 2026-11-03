@@ -498,4 +498,31 @@ public class EventBusStickyTest extends TestBase {
 
     public static class SubSubEvent extends SubEvent {
     }
+
+    @Test
+    void register_whenStickyEventIsReplacedDuringReplay_doesNotReplayRemovedEvent() {
+        eventBus.postSticky("first").postSticky("second");
+        List<String> received = new ArrayList<>();
+        AtomicReference<String> removed = new AtomicReference<>();
+        Object subscriber = new Object() {
+            @Subscribe(sticky = true)
+            public void on(final String event) {
+                received.add(event);
+
+                if (removed.get() == null) {
+                    // Replay order is unspecified, so replace whichever event has not been replayed yet; the
+                    // replacement is delivered live, reentrantly.
+                    removed.set("first".equals(event) ? "second" : "first");
+                    assertTrue(eventBus.removeStickyEvent(removed.get()));
+                    eventBus.postSticky("third");
+                }
+            }
+        };
+
+        eventBus.register(subscriber);
+
+        assertEquals(2, received.size());
+        assertEquals("third", received.get(1));
+        assertFalse(received.contains(removed.get()));
+    }
 }

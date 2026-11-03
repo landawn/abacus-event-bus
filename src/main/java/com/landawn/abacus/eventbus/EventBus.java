@@ -16,6 +16,7 @@ package com.landawn.abacus.eventbus;
 
 import java.lang.ref.WeakReference;
 import java.lang.reflect.GenericArrayType;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.ParameterizedType;
@@ -30,6 +31,7 @@ import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -97,11 +99,14 @@ import com.landawn.abacus.util.cs;
  *
  * eventBus.post("Hello World");
  * eventBus.post("myEventId", "Targeted Event");
- * eventBus.postSticky("Sticky Message");
+ * final String stickyMessage = "Sticky Message";
+ * eventBus.postSticky(stickyMessage);
  *
  * eventBus.unregister(strSubscriber);
  * eventBus.unregister(annotatedSubscriber);
- * eventBus.removeStickyEvent("Sticky Message"); // otherwise the default bus retains it for the life of the JVM
+ * // Sticky events are removed by identity, so pass the instance that was posted;
+ * // otherwise the default bus retains it for the life of the JVM.
+ * eventBus.removeStickyEvent(stickyMessage);
  * }</pre>
  *
  * <p>This class is thread-safe and can be used in multi-threaded environments. Filtering atomically
@@ -223,6 +228,13 @@ public class EventBus {
     private final Map<Object, List<SubIdentifier>> registeredSubMap = new IdentityHashMap<>();
 
     /**
+     * The handlers without an effective event ID, maintained incrementally under {@link #registeredSubMap}'s monitor
+     * so that rebuilding {@link #noEventIdSubs} copies one set instead of rescanning every registration: registering
+     * n subscribers interleaved with posts would otherwise cost O(n) map traversals each.
+     */
+    private final Set<SubIdentifier> noEventIdSubSet = new LinkedHashSet<>();
+
+    /**
      * Handlers with an effective event ID, by that ID. All mutations happen under this map's monitor; it is a
      * concurrent map only so that a post to an ID with no handlers can find that out without taking the monitor.
      */
@@ -250,7 +262,8 @@ public class EventBus {
      * sticky events to replay) against {@link #postSticky} (record the sticky event + resolve its
      * delivery list). Holding this single lock across those two short critical sections (never across
      * the actual {@code dispatch(...)}, which may run subscriber code) guarantees that a sticky event
-     * is delivered to a concurrently-registering subscriber exactly once — either by {@code postSticky}'s
+     * is delivered to a concurrently-registering subscriber exactly once (at most once if the handler's
+     * interval or deduplication filter suppresses it) — either by {@code postSticky}'s
      * own delivery (if the subscriber was already visible) or by {@code register}'s replay (if the event
      * was already recorded), but never both. It also makes each {@code register}/{@code unregister} update
      * of {@code registeredSubMap} plus {@code registeredEventIdSubMap} one transaction: without it, an
@@ -427,7 +440,20 @@ public class EventBus {
      * @return the top-level thread group, or under a security manager the highest group whose parent may be read
      */
     private static ThreadGroup topLevelThreadGroup() {
-        ThreadGroup group = Thread.currentThread().getThreadGroup();
+        final Thread current = Thread.currentThread();
+        ThreadGroup group = current.getThreadGroup();
+
+        if (current.isVirtual()) {
+            // Every virtual thread reports the JDK's synthetic "VirtualThreads" group, a direct child of the system
+            // group, so the walk below would stop there and file platform workers and hook threads under it.
+            final ThreadGroup nonVirtual = nonVirtualTopLevelGroup(group);
+
+            if (nonVirtual == null) {
+                return group;
+            }
+
+            group = nonVirtual;
+        }
 
         // g.getParent() checks access to g's parent, and the default security manager guards only the system group.
         // So a denied g.getParent() means g sits directly below the system group: g is the top-level group. Testing
@@ -454,6 +480,43 @@ public class EventBus {
             }
 
             group = parent;
+        }
+    }
+
+    /**
+     * Returns a top-level thread group other than {@code virtualGroup} (the group virtual threads report), preferring
+     * {@code "main"}, or {@code null} if none can be found or a security manager denies the lookup.
+     *
+     * @param virtualGroup the group of the current virtual thread
+     * @return a sibling of {@code virtualGroup} below the system group, or {@code null}
+     */
+    private static ThreadGroup nonVirtualTopLevelGroup(final ThreadGroup virtualGroup) {
+        try {
+            final ThreadGroup systemGroup = virtualGroup.getParent();
+
+            if (systemGroup == null) {
+                return null;
+            }
+
+            final ThreadGroup[] children = new ThreadGroup[systemGroup.activeGroupCount() + 1];
+            final int count = systemGroup.enumerate(children, false);
+            ThreadGroup fallback = null;
+
+            for (int i = 0; i < count; i++) {
+                if (children[i] != virtualGroup) {
+                    if ("main".equals(children[i].getName())) {
+                        return children[i];
+                    }
+
+                    if (fallback == null) {
+                        fallback = children[i];
+                    }
+                }
+            }
+
+            return fallback;
+        } catch (final SecurityException e) {
+            return null;
         }
     }
 
@@ -577,14 +640,15 @@ public class EventBus {
     /**
      * Creates a new {@code EventBus} instance with the specified identifier and executor.
      * The executor is used for asynchronous event delivery when {@link ThreadMode#THREAD_POOL_EXECUTOR} is specified.
-     * If the supplied executor is an {@link ExecutorService} other than the shared default executor, it is
-     * registered, by identity, with a single process-wide JVM shutdown hook. At JVM exit that hook calls
+     * If the supplied executor is an {@link ExecutorService} other than the shared default executor or
+     * {@link ForkJoinPool#commonPool()}, it is registered, by identity, with a single process-wide JVM shutdown hook. At JVM exit that hook calls
      * {@code shutdown()} on every registered executor service that is still reachable and then waits up to
      * 60 seconds in total for them to terminate. Creating many buses over one executor service adds no further
      * hooks, and creating a bus while the JVM is already shutting down, or while a security manager denies
      * {@code RuntimePermission("shutdownHooks")}, registers nothing. A plain {@link Executor} is never shut down
      * by the bus, and neither is {@link ForkJoinPool#commonPool()}, which cannot be shut down and is never
-     * registered (waiting for it at exit would wait for every unrelated task in the common pool).
+     * registered (waiting for it at exit would wait for every unrelated task in the common pool). A wrapper around
+     * the common pool is not recognized as such, so do not pass one.
      *
      * <p>Registration is weak, so a discarded bus does not pin its executor service. Once the object passed here
      * becomes unreachable, the hook neither shuts it down nor waits for it. That can happen to a decorator over a
@@ -731,7 +795,8 @@ public class EventBus {
     }
 
     /**
-     * Checks whether any registered subscriber would receive an event of the given type.
+     * Checks whether any registered subscriber has a handler that accepts events of the given type, regardless of
+     * event ID.
      *
      * <p>A subscriber matches when one of its handlers' parameter type (that of a {@link Subscribe @Subscribe}
      * method or of its {@link Subscriber#on(Object)} implementation) is compatible with {@code eventType}: for a normal subscriber the parameter type must be
@@ -746,6 +811,8 @@ public class EventBus {
      * <p><b>Usage Examples:</b></p>
      * <pre>{@code
      * record OrderPlacedEvent(long orderId) {}
+     * // Skips building the event when no handler of any event ID accepts it. To test whether a post without an
+     * // event ID would reach anyone, use !eventBus.subscribers(OrderPlacedEvent.class).isEmpty() instead.
      * if (eventBus.hasSubscribers(OrderPlacedEvent.class)) {
      *     eventBus.post(new OrderPlacedEvent(42L));
      * }
@@ -764,7 +831,7 @@ public class EventBus {
         synchronized (registeredSubMap) {
             for (final List<SubIdentifier> subs : registeredSubMap.values()) {
                 for (final SubIdentifier sub : subs) {
-                    if (sub.strictEventType ? sub.parameterType.equals(matchType) : sub.parameterType.isAssignableFrom(matchType)) {
+                    if (sub.acceptsType(matchType)) {
                         return true;
                     }
                 }
@@ -805,7 +872,7 @@ public class EventBus {
      * @throws IllegalArgumentException if {@code subscriber} is {@code null}, if inherited {@code @Subscribe} declarations of a handler method
      *         conflict, or if no subscriber methods are found in the subscriber class.
      * @throws RuntimeException if a {@code @Subscribe} method of the subscriber's class or a superclass is {@code static} (whatever its visibility),
-     *         or is {@code public} and does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
+     *         or if a {@code public} {@code @Subscribe} method of the class or any supertype does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
      *         if a handler method cannot be made accessible, for example one in a non-public class whose package is in a named module not opened to this library
      * @throws IllegalStateException if the subscriber is identified as a lambda subscriber (an event ID is required for lambda subscribers)
      */
@@ -833,7 +900,7 @@ public class EventBus {
      * @throws IllegalArgumentException if {@code subscriber} is {@code null}, if inherited {@code @Subscribe} declarations of a handler method
      *         conflict, or if no subscriber methods are found in the subscriber class.
      * @throws RuntimeException if a {@code @Subscribe} method of the subscriber's class or a superclass is {@code static} (whatever its visibility),
-     *         or is {@code public} and does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
+     *         or if a {@code public} {@code @Subscribe} method of the class or any supertype does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
      *         if a handler method cannot be made accessible, for example one in a non-public class whose package is in a named module not opened to this library
      * @throws IllegalStateException if the subscriber is identified as a lambda subscriber and {@code eventId} is empty or {@code null}
      */
@@ -859,7 +926,7 @@ public class EventBus {
      * @throws IllegalArgumentException if {@code subscriber} is {@code null}, if {@code threadMode} is not supported, if inherited {@code @Subscribe}
      *         declarations of a handler method conflict, or if no subscriber methods are found in the subscriber class.
      * @throws RuntimeException if a {@code @Subscribe} method of the subscriber's class or a superclass is {@code static} (whatever its visibility),
-     *         or is {@code public} and does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
+     *         or if a {@code public} {@code @Subscribe} method of the class or any supertype does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
      *         if a handler method cannot be made accessible, for example one in a non-public class whose package is in a named module not opened to this library
      * @throws IllegalStateException if the subscriber is identified as a lambda subscriber (an event ID is required for lambda subscribers)
      */
@@ -875,7 +942,10 @@ public class EventBus {
      * override if given, otherwise the annotation's), so a {@code THREAD_POOL_EXECUTOR} sticky delivery is handed
      * to this bus's executor: with the default executor it runs on a background thread, but a caller-supplied
      * direct executor (such as {@code Runnable::run}) runs it on the registering thread before {@code register}
-     * returns.
+     * returns. A failure delivering a replayed event is logged; an {@link Error} thrown on the registering thread
+     * outside the handler (by the event's {@code equals()} while deduplicating, or by the executor) propagates after
+     * the subscriber has been registered, skipping the remaining replays. A sticky event removed while this call is
+     * replaying is skipped if its turn has not yet come, but one already being replayed is still delivered.
      *
      * <p>Subscriber identity is tracked by reference (an {@link IdentityHashMap}). Re-registering the
      * <em>same</em> subscriber instance <em>replaces</em> its previous registration rather than adding a second
@@ -907,7 +977,7 @@ public class EventBus {
      * @throws IllegalArgumentException if {@code subscriber} is {@code null}, if {@code threadMode} is not supported, if inherited {@code @Subscribe}
      *         declarations of a handler method conflict, or if no subscriber methods are found in the subscriber class.
      * @throws RuntimeException if a {@code @Subscribe} method of the subscriber's class or a superclass is {@code static} (whatever its visibility),
-     *         or is {@code public} and does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
+     *         or if a {@code public} {@code @Subscribe} method of the class or any supertype does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
      *         if a handler method cannot be made accessible, for example one in a non-public class whose package is in a named module not opened to this library
      * @throws IllegalStateException if the subscriber is identified as a lambda subscriber and {@code eventId} is empty or {@code null}
      */
@@ -952,44 +1022,40 @@ public class EventBus {
             synchronized (registeredSubMap) {
                 oldSubEvents = registeredSubMap.put(subscriber, eventSubList);
 
-                if (hasNoEventIdSub(eventSubList) || hasNoEventIdSub(oldSubEvents)) {
+                // Remove before adding: the old and new handlers of a re-registered instance are equal, and a set
+                // keeps the element already present, so adding first would keep the old one and then remove it.
+                boolean noEventIdSubsChanged = removeNoEventIdSubs(oldSubEvents);
+
+                for (final SubIdentifier sub : eventSubList) {
+                    if (sub.eventId == null) {
+                        noEventIdSubSet.add(sub);
+                        noEventIdSubsChanged = true;
+                    }
+                }
+
+                if (noEventIdSubsChanged) {
                     noEventIdSubs = null;
                 }
             }
 
-            if (N.notEmpty(oldSubEvents)) {
-                removeFromEventIdSubMap(oldSubEvents);
-            }
+            // Replace the old handlers in one critical section, and keep an event ID whose set the removal empties
+            // until the new handlers are added. Otherwise a concurrent post to that ID - including the lock-free
+            // containsKey miss in resolveSubscribers - could fall between the two updates and reach neither the
+            // old nor the new registration of a subscriber that was registered throughout.
+            synchronized (registeredEventIdSubMap) {
+                if (oldSubEvents != null) {
+                    removeFromEventIdSubMap(oldSubEvents, false);
+                }
 
-            if (Strings.isEmpty(eventId)) {
-                synchronized (registeredEventIdSubMap) {
-                    for (final SubIdentifier sub : eventSubList) {
-                        if (Strings.isEmpty(sub.eventId)) {
-                            continue;
-                        }
-
-                        final Set<SubIdentifier> eventSubs = registeredEventIdSubMap.get(sub.eventId);
-
-                        if (eventSubs == null) {
-                            registeredEventIdSubMap.put(sub.eventId, N.toLinkedHashSet(sub));
-                        } else {
-                            eventSubs.add(sub);
-                        }
-
+                for (final SubIdentifier sub : eventSubList) {
+                    if (sub.eventId != null) {
+                        registeredEventIdSubMap.computeIfAbsent(sub.eventId, k -> new LinkedHashSet<>()).add(sub);
                         listOfEventIdSubMap.remove(sub.eventId);
                     }
                 }
-            } else {
-                synchronized (registeredEventIdSubMap) {
-                    final Set<SubIdentifier> eventSubs = registeredEventIdSubMap.get(eventId);
 
-                    if (eventSubs == null) {
-                        registeredEventIdSubMap.put(eventId, N.newLinkedHashSet(eventSubList));
-                    } else {
-                        eventSubs.addAll(eventSubList);
-                    }
-
-                    listOfEventIdSubMap.remove(eventId);
+                if (oldSubEvents != null) {
+                    removeEmptyEventIds(oldSubEvents);
                 }
             }
 
@@ -1018,7 +1084,7 @@ public class EventBus {
             for (final SubIdentifier sub : eventSubList) {
                 if (sub.sticky) {
                     for (final Map.Entry<Object, String> entry : stickySnapshot.entrySet()) {
-                        if (sub.isMyEvent(entry.getValue(), entry.getKey().getClass())) {
+                        if (sub.isMyEvent(entry.getValue(), entry.getKey().getClass()) && isStillRetained(stickySnapshot, entry.getKey(), entry.getValue())) {
                             try {
                                 dispatch(sub, entry.getKey());
                             } catch (final Exception e) {
@@ -1035,6 +1101,31 @@ public class EventBus {
     }
 
     /**
+     * Returns whether a sticky event taken from {@code snapshot} is still retained under the same event ID. The replay
+     * runs outside every lock, so the snapshot can go stale while earlier replays run subscriber code: replaying a
+     * sticky event that was meanwhile removed (and typically replaced by a newer one, already delivered live by
+     * {@code postSticky}) would hand the subscriber the stale event last. This narrows, but cannot close, that window.
+     *
+     * @param snapshot the sticky snapshot being replayed
+     * @param event a retained event from {@code snapshot}
+     * @param eventId the event ID {@code event} was retained under in {@code snapshot}
+     * @return {@code true} if {@code event} is still retained under {@code eventId}
+     */
+    private boolean isStillRetained(final Map<Object, String> snapshot, final Object event, final String eventId) {
+        // Every sticky mutation clears mapOfStickyEvent and a rebuild creates a new map, so while the cache still
+        // holds this very snapshot nothing has changed and the lock can be skipped.
+        if (mapOfStickyEvent == snapshot) {
+            return true;
+        }
+
+        synchronized (stickyEventMap) {
+            final String retainedEventId = stickyEventMap.get(event);
+
+            return N.equals(retainedEventId, eventId) && (retainedEventId != null || stickyEventMap.containsKey(event));
+        }
+    }
+
+    /**
      * Returns the cached list of prototype {@link SubIdentifier}s for the given subscriber class,
      * building it on first use. The class and all of its supertypes (superclasses and interfaces) are
      * scanned for {@code public}, non-{@code static}, single-argument methods annotated with
@@ -1046,7 +1137,7 @@ public class EventBus {
      * @param subscriberClass the subscriber class to introspect
      * @return the prototype subscriber-method descriptors for {@code subscriberClass}, possibly empty
      * @throws RuntimeException if a {@code @Subscribe} method declared by the class or a superclass is {@code static},
-     *         or if one is {@code public} and does not declare exactly one parameter, or if a selected handler method
+     *         or if a {@code public} one declared by the class or any supertype does not declare exactly one parameter, or if a selected handler method
      *         cannot be made accessible
      * @throws IllegalArgumentException if equally specific inherited {@code @Subscribe} declarations of a handler method conflict
      */
@@ -1060,8 +1151,9 @@ public class EventBus {
         // the erased parameter type (handle(Object)) while the overridden declaration still resolves its type
         // argument (handle(T) with T = String), so their resolved signatures differ although both name one virtual
         // method - which was then registered, and invoked, twice. Every declaration is therefore filed under the
-        // group that first claimed its erased signature (each class is scanned before its supertypes and the
-        // interfaces it declares).
+        // group that first claimed its erased signature. Each class is scanned before its own supertypes, but a
+        // superinterface reachable through an earlier path (the superclass, or an interface declared first) can be
+        // scanned before a subinterface that overrides it; isBridged(..) below is checked in both directions for that.
         final Map<String, String> groupByErasedSignature = new HashMap<>();
         final Map<Class<?>, Map<TypeVariable<?>, Class<?>>> typeBindings = new LinkedHashMap<>();
         collectTypeBindings(subscriberClass, Collections.emptyMap(), typeBindings);
@@ -1107,7 +1199,12 @@ public class EventBus {
                         // bridges the two. Below a raw supertype there is no bridge (JLS 4.8 erases its supertypes), so
                         // e.g. handle(Number) in a raw subclass merely overloads an inherited handle(T) resolved to
                         // Number; merging them dropped the inherited handler.
-                        if (sameResolvedSignature != null && !isBridged(subscriberClass, method.getName(), parameterTypes[0])) {
+                        // The bridge sits on the less specific erasure, whichever of the two was scanned first. When a
+                        // superinterface J<T>.handle(T) was scanned before its overriding subinterface
+                        // I.handle(String), the bridge is on the existing group's handle(Object); checking only the
+                        // current erasure split one virtual method into two groups and invoked it twice per event.
+                        if (sameResolvedSignature != null && !isBridged(subscriberClass, method.getName(), parameterTypes[0])
+                                && !isBridged(subscriberClass, method.getName(), sameResolvedSignature.get(0).method().getParameterTypes()[0])) {
                             methodSignature = "erased:" + erasedSignature;
                         }
 
@@ -1146,6 +1243,11 @@ public class EventBus {
      * Returns whether calls to the public method {@code name(erasedParameterType)} of {@code subscriberClass} are
      * redirected by a compiler-generated bridge, i.e. whether a declaration with that erased signature is overridden
      * by one with a more specific erased parameter type.
+     *
+     * @param subscriberClass the class whose public members are searched
+     * @param name the method name
+     * @param erasedParameterType the erased type of the method's single parameter
+     * @return {@code true} if the resolved public method is a bridge; {@code false} if it is not or does not exist
      */
     private static boolean isBridged(final Class<?> subscriberClass, final String name, final Class<?> erasedParameterType) {
         try {
@@ -1275,7 +1377,7 @@ public class EventBus {
      * @throws IllegalArgumentException if {@code subscriber} is {@code null}, if inherited {@code @Subscribe} declarations of a handler method
      *         conflict, or if no subscriber methods are found.
      * @throws RuntimeException if a {@code @Subscribe} method of the subscriber's class or a superclass is {@code static} (whatever its visibility),
-     *         or is {@code public} and does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
+     *         or if a {@code public} {@code @Subscribe} method of the class or any supertype does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
      *         if a handler method cannot be made accessible, for example one in a non-public class whose package is in a named module not opened to this library
      * @throws IllegalStateException if the subscriber is identified as a lambda subscriber and {@code eventId} is empty or {@code null}
      */
@@ -1304,7 +1406,7 @@ public class EventBus {
      * @throws IllegalArgumentException if {@code subscriber} is {@code null}, if {@code threadMode} is not supported, if inherited {@code @Subscribe}
      *         declarations of a handler method conflict, or if no subscriber methods are found.
      * @throws RuntimeException if a {@code @Subscribe} method of the subscriber's class or a superclass is {@code static} (whatever its visibility),
-     *         or is {@code public} and does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
+     *         or if a {@code public} {@code @Subscribe} method of the class or any supertype does not declare exactly one parameter, or ({@link java.lang.reflect.InaccessibleObjectException})
      *         if a handler method cannot be made accessible, for example one in a non-public class whose package is in a named module not opened to this library
      * @throws IllegalStateException if the subscriber is identified as a lambda subscriber and {@code eventId} is empty or {@code null}
      */
@@ -1321,8 +1423,9 @@ public class EventBus {
      * All event subscriptions for this subscriber will be removed.
      * This method should be called when a subscriber is no longer needed to prevent memory leaks.
      * If the subscriber was not previously registered, this method does nothing.
-     * Concurrent registration and unregistration update the subscriber registry and event-ID index together.
-     * Events already selected for dispatch, including queued asynchronous deliveries, may still be delivered.
+     * Registration and unregistration are serialized with each other; a concurrent post may observe the registry
+     * before or after the change. Events already selected for dispatch, including queued asynchronous deliveries,
+     * may still be delivered.
      *
      * <p><b>Usage Examples:</b></p>
      * <pre>{@code
@@ -1344,13 +1447,15 @@ public class EventBus {
             synchronized (registeredSubMap) {
                 subEvents = registeredSubMap.remove(subscriber);
 
-                if (hasNoEventIdSub(subEvents)) {
+                if (removeNoEventIdSubs(subEvents)) {
                     noEventIdSubs = null;
                 }
             }
 
-            if (N.notEmpty(subEvents)) {
-                removeFromEventIdSubMap(subEvents);
+            if (subEvents != null) {
+                synchronized (registeredEventIdSubMap) {
+                    removeFromEventIdSubMap(subEvents, true);
+                }
             }
         }
 
@@ -1358,54 +1463,76 @@ public class EventBus {
     }
 
     /**
+     * Removes the handlers of {@code subs} that have no effective event ID from {@link #noEventIdSubSet}. The caller
+     * must hold {@link #registeredSubMap}'s monitor.
+     *
+     * @param subs the handlers being removed, possibly {@code null}
+     * @return {@code true} if any handler was removed, so the no-event-ID delivery snapshot is stale
+     */
+    private boolean removeNoEventIdSubs(final List<SubIdentifier> subs) {
+        boolean removed = false;
+
+        if (subs != null) {
+            for (final SubIdentifier sub : subs) {
+                if (sub.eventId == null && noEventIdSubSet.remove(sub)) {
+                    removed = true;
+                }
+            }
+        }
+
+        return removed;
+    }
+
+    /**
      * Removes the given subscriber identifiers from the event-id index ({@code registeredEventIdSubMap})
-     * and invalidates the corresponding cached snapshots in {@code listOfEventIdSubMap}. Any event ID
-     * whose subscriber set becomes empty as a result is removed from the index entirely.
+     * and invalidates the corresponding cached snapshots in {@code listOfEventIdSubMap}. The caller must hold
+     * {@code registeredEventIdSubMap}'s monitor.
      *
      * @param subEventsToRemove the subscriber identifiers to remove
+     * @param removeEmptySets whether to drop an event ID whose subscriber set becomes empty; {@code false} when the
+     *        caller will add replacement handlers and then call {@link #removeEmptyEventIds(List)} itself
      */
-    private void removeFromEventIdSubMap(final List<SubIdentifier> subEventsToRemove) {
-        synchronized (registeredEventIdSubMap) {
-            /*
-             * Every identifier in the index is filed under its own (non-empty) eventId - see register(...) - so
-             * only those keys can be affected. Looking them up directly keeps unregister O(identifiers removed)
-             * instead of O(all event IDs), and leaves the cached delivery lists of unaffected event IDs intact
-             * (they are only ever built from, and invalidated with, the index under this same lock).
-             */
-            for (final SubIdentifier sub : subEventsToRemove) {
-                if (sub.eventId == null) {
-                    continue;
+    private void removeFromEventIdSubMap(final List<SubIdentifier> subEventsToRemove, final boolean removeEmptySets) {
+        /*
+         * Every identifier in the index is filed under its own (non-empty) eventId - see register(...) - so
+         * only those keys can be affected. Looking them up directly keeps unregister O(identifiers removed)
+         * instead of O(all event IDs), and leaves the cached delivery lists of unaffected event IDs intact
+         * (they are only ever built from, and invalidated with, the index under this same lock).
+         */
+        for (final SubIdentifier sub : subEventsToRemove) {
+            if (sub.eventId == null) {
+                continue;
+            }
+
+            final Set<SubIdentifier> eventSubs = registeredEventIdSubMap.get(sub.eventId);
+
+            if (eventSubs != null && eventSubs.remove(sub)) {
+                if (removeEmptySets && eventSubs.isEmpty()) {
+                    registeredEventIdSubMap.remove(sub.eventId);
                 }
 
-                final Set<SubIdentifier> eventSubs = registeredEventIdSubMap.get(sub.eventId);
-
-                if (eventSubs != null && eventSubs.remove(sub)) {
-                    if (eventSubs.isEmpty()) {
-                        registeredEventIdSubMap.remove(sub.eventId);
-                    }
-
-                    listOfEventIdSubMap.remove(sub.eventId);
-                }
+                listOfEventIdSubMap.remove(sub.eventId);
             }
         }
     }
 
     /**
-     * Returns whether any of {@code subs} has no effective event ID, i.e. belongs in {@link #noEventIdSubs}.
+     * Drops each event ID of {@code subs} whose subscriber set is empty, so that IDs nobody listens on any more are
+     * not retained. The caller must hold {@code registeredEventIdSubMap}'s monitor.
      *
-     * @param subs the handlers to check, possibly {@code null}
-     * @return {@code true} if a change to {@code subs} invalidates the no-event-ID delivery snapshot
+     * @param subs the handlers whose event IDs to check
      */
-    private static boolean hasNoEventIdSub(final List<SubIdentifier> subs) {
-        if (subs != null) {
-            for (final SubIdentifier sub : subs) {
-                if (sub.eventId == null) {
-                    return true;
+    private void removeEmptyEventIds(final List<SubIdentifier> subs) {
+        for (final SubIdentifier sub : subs) {
+            if (sub.eventId != null) {
+                final Set<SubIdentifier> eventSubs = registeredEventIdSubMap.get(sub.eventId);
+
+                if (eventSubs != null && eventSubs.isEmpty()) {
+                    registeredEventIdSubMap.remove(sub.eventId);
+                    listOfEventIdSubMap.remove(sub.eventId);
                 }
             }
         }
-
-        return false;
     }
 
     /**
@@ -1489,17 +1616,7 @@ public class EventBus {
                     if (subs == null) {
                         // Pre-filtered: event-ID handlers can never match a post without an ID, and scanning them on
                         // every such post made its cost grow with every subscriber registered under any event ID.
-                        final List<SubIdentifier> candidates = new ArrayList<>();
-
-                        for (final List<SubIdentifier> registered : registeredSubMap.values()) {
-                            for (final SubIdentifier sub : registered) {
-                                if (sub.eventId == null) {
-                                    candidates.add(sub);
-                                }
-                            }
-                        }
-
-                        subs = candidates.toArray(NO_SUBS);
+                        subs = noEventIdSubSet.toArray(NO_SUBS);
                         noEventIdSubs = subs;
                     }
                 }
@@ -1511,7 +1628,8 @@ public class EventBus {
         SubIdentifier[] subs = listOfEventIdSubMap.get(normalizedEventId);
 
         if (subs == null) {
-            // Lock-free miss for an ID nobody listens on: such a post linearizes before any racing register.
+            // Lock-free miss for an ID nobody listens on: such a post linearizes before any racing register. (A
+            // re-registration never makes the ID look absent: register keeps its key until the new handlers are in.)
             // postSticky still sees every register that precedes it, because both run under stickyDeliveryLock.
             if (!registeredEventIdSubMap.containsKey(normalizedEventId)) {
                 return NO_SUBS;
@@ -1545,8 +1663,9 @@ public class EventBus {
     private void dispatchToSubscribers(final SubIdentifier[] subscribers, final String normalizedEventId, final Object event) {
         final Class<?> eventClass = event.getClass();
 
+        // resolveSubscribers only returns handlers whose effective event ID is normalizedEventId, so only the type is checked.
         for (final SubIdentifier subscriber : subscribers) {
-            if (subscriber.isMyEvent(normalizedEventId, eventClass)) {
+            if (subscriber.acceptsType(eventClass)) {
                 try {
                     dispatch(subscriber, event);
                 } catch (final Exception e) {
@@ -1628,7 +1747,8 @@ public class EventBus {
 
     /**
      * Removes {@code event} if that exact instance ({@code ==}, not {@code equals()}) is currently retained
-     * without an event ID; it will then no longer be replayed to future subscribers. An instance retained under
+     * without an event ID; subscribers that register after this call returns will no longer receive it (a replay
+     * already handing it to a subscriber may still complete). An instance retained under
      * an event ID is left in place; use {@link #removeStickyEvent(String, Object)}. A {@code null} event is never
      * retained, so it returns {@code false}.
      *
@@ -1782,7 +1902,7 @@ public class EventBus {
      *
      * @param <T> the event type
      * @param eventType the class type to search for; a primitive class matches its wrapper type
-     * @return a list of sticky events that can be assigned to the specified type
+     * @return a list, in unspecified order, of sticky events that can be assigned to the specified type
      * @throws IllegalArgumentException if {@code eventType} is {@code null}.
      */
     public <T> List<T> stickyEvents(final Class<T> eventType) throws IllegalArgumentException {
@@ -1801,7 +1921,7 @@ public class EventBus {
      * @param <T> the event type
      * @param eventId the event ID to match, or {@code null} or empty for events retained without an event ID
      * @param eventType the class type to search for; a primitive class matches its wrapper type
-     * @return a list of sticky events matching both the type and event ID
+     * @return a list, in unspecified order, of sticky events matching both the type and event ID
      * @throws IllegalArgumentException if {@code eventType} is {@code null}.
      */
     public <T> List<T> stickyEvents(final String eventId, final Class<T> eventType) throws IllegalArgumentException {
@@ -1923,7 +2043,7 @@ public class EventBus {
             }
 
             default:
-                throw new IllegalArgumentException("Unsupported thread mode");
+                throw new IllegalArgumentException("Unsupported thread mode: " + identifier.threadMode);
         }
     }
 
@@ -2004,18 +2124,29 @@ public class EventBus {
 
     /**
      * Invokes the subscriber method for an already-reserved delivery. Any exception from the reflective
-     * invocation or from the subscriber itself is caught and logged, never propagated.
+     * invocation, or any throwable from the subscriber itself, is caught and logged, never propagated.
      *
      * @param sub the subscriber identifier whose method is invoked
      * @param event the accepted event
      */
+    @SuppressWarnings("unchecked")
     private static void invoke(final SubIdentifier sub, final Object event) {
         try {
             if (logger.isDebugEnabled()) {
                 logger.debug("Posting event: {} to subscriber: {}", diagnosticString(event), diagnosticString(sub));
             }
 
-            sub.method.invoke(sub.instance, event);
+            if (sub.isSubscriberContract) {
+                // A plain interface call is markedly cheaper than reflection for the common lambda subscriber.
+                // Wrapping a failure as reflection would keeps logging identical, Errors included.
+                try {
+                    ((Subscriber<Object>) sub.instance).on(event);
+                } catch (final Throwable e) {
+                    throw new InvocationTargetException(e);
+                }
+            } else {
+                sub.method.invoke(sub.instance, event);
+            }
         } catch (final Exception e) {
             logger.error("Failed to post event: " + diagnosticString(event) + " to subscriber: " + diagnosticString(sub), e);
         }
@@ -2077,7 +2208,7 @@ public class EventBus {
         Reservation previous;
 
         /**
-         * Whether this submission was accepted or its callback began. Written under the subscriber monitor,
+         * Whether {@code execute} returned normally for this submission or its callback began. Written under the subscriber monitor,
          * after clearing predecessor history; once true it never changes, allowing later operations to skip the monitor.
          */
         volatile boolean committed;
@@ -2151,6 +2282,13 @@ public class EventBus {
          * implementation); such a subscriber requires an explicit event ID.
          */
         final boolean isPossibleLambdaSubscriber;
+
+        /**
+         * {@code true} when {@link #method} is {@link Subscriber#on(Object)} itself and {@link #instance} implements
+         * it, so the handler can be called through the interface instead of reflection. Derived from {@link #method}
+         * and {@link #instance}, so it takes no part in {@code equals}/{@code hashCode}.
+         */
+        final boolean isSubscriberContract;
 
         /**
          * The monotonic time when the last delivery attempt was accepted for this subscriber.
@@ -2344,6 +2482,7 @@ public class EventBus {
 
             isPossibleLambdaSubscriber = Subscriber.class.isAssignableFrom(method.getDeclaringClass()) && method.getName().equals("on")
                     && parameterType.equals(Object.class) && subscribe == null;
+            isSubscriberContract = false; // a prototype has no instance to call
 
             // setAccessible is caller-sensitive: under JPMS it checks the calling module. Calling it here honors a
             // package opened to this event bus module, which ClassUtil.setAccessible (whose module is abacus-common)
@@ -2382,6 +2521,7 @@ public class EventBus {
             intervalMillis = sub.intervalMillis;
             deduplicate = sub.deduplicate;
             isPossibleLambdaSubscriber = sub.isPossibleLambdaSubscriber;
+            isSubscriberContract = method.getDeclaringClass() == Subscriber.class && obj instanceof Subscriber;
         }
 
         /**
@@ -2394,10 +2534,16 @@ public class EventBus {
          * @return {@code true} if this subscriber is eligible to receive the event
          */
         boolean isMyEvent(final String eventId, final Class<?> eventType) {
-            if (!N.equals(this.eventId, eventId)) {
-                return false;
-            }
+            return N.equals(this.eventId, eventId) && acceptsType(eventType);
+        }
 
+        /**
+         * Determines whether this subscriber accepts an event of the specified runtime type, ignoring the event ID.
+         *
+         * @param eventType the runtime type of the posted event
+         * @return {@code true} if {@code eventType} is compatible with {@link #parameterType}, respecting {@link #strictEventType}
+         */
+        boolean acceptsType(final Class<?> eventType) {
             return strictEventType ? parameterType.equals(eventType) : parameterType.isAssignableFrom(eventType);
         }
 

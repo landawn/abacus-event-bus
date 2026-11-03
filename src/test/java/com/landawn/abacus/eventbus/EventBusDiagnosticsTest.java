@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.lang.reflect.InvocationTargetException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.RejectedExecutionException;
@@ -303,5 +304,23 @@ public class EventBusDiagnosticsTest extends TestBase {
             context.updateLoggers();
             appender.stop();
         }
+    }
+
+    @Test
+    void post_whenLambdaSubscriberThrowsError_logsItAndContinuesDelivery() {
+        withLogs(Level.INFO, logs -> {
+            EventBus bus = EventBus.create();
+            List<Object> received = new ArrayList<>();
+            AssertionError failure = new AssertionError("lambda failure");
+            bus.register((Subscriber<String>) event -> {
+                throw failure;
+            }, "id");
+            bus.register((Subscriber<String>) received::add, "id");
+
+            assertDoesNotThrow(() -> bus.post("id", "event"));
+
+            assertEquals(List.of("event"), received);
+            assertTrue(logs.stream().anyMatch(log -> log.getThrown() instanceof InvocationTargetException && log.getThrown().getCause() == failure));
+        });
     }
 }

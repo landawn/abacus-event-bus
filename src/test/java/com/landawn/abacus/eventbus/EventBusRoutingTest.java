@@ -335,4 +335,24 @@ public class EventBusRoutingTest extends TestBase {
     private static Stream<Object> payloads() {
         return Stream.of(new CustomEvent("value"), List.of(new CustomEvent("first"), new CustomEvent("second")));
     }
+
+    @Test
+    void register_whenSameInstanceMovesBetweenNoEventIdAndEventId_routesOnlyToCurrentRegistration() {
+        EventBus bus = EventBus.create();
+        List<String> received = new ArrayList<>();
+        Subscriber<String> subscriber = new Subscriber<>() {
+            @Override
+            public void on(final String event) {
+                received.add(event);
+            }
+        };
+
+        bus.register(subscriber).post("a");
+        bus.register(subscriber, "id").post("b").post("id", "c");
+        bus.register(subscriber).register(subscriber).post("d").post("id", "e");
+        bus.unregister(subscriber).post("f").post("id", "g");
+
+        assertEquals(List.of("a", "c", "d"), received);
+        assertEquals(0, bus.countOfSubscribers());
+    }
 }

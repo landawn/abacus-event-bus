@@ -727,4 +727,96 @@ public class EventBusGenericTest extends TestBase {
                 Arguments.of(new LowerBoundOwnerHandler(new Owner<>()), List.of("text", 42)),
                 Arguments.of(new UnboundedOwnerHandler(new Owner<>()), List.of("text", 42)));
     }
+
+    interface GenericHandle<T> {
+        @Subscribe
+        void handle(T event);
+    }
+
+    interface StringHandle extends GenericHandle<String> {
+        List<String> events();
+
+        @Subscribe
+        @Override
+        default void handle(final String event) {
+            events().add(event);
+        }
+    }
+
+    // GenericHandle is a direct superinterface declared before StringHandle, so it is scanned first.
+    static class SuperInterfaceDeclaredFirst implements GenericHandle<String>, StringHandle {
+        final List<String> events = new ArrayList<>();
+
+        @Override
+        public List<String> events() {
+            return events;
+        }
+    }
+
+    static class SubInterfaceDeclaredFirst implements StringHandle, GenericHandle<String> {
+        final List<String> events = new ArrayList<>();
+
+        @Override
+        public List<String> events() {
+            return events;
+        }
+    }
+
+    abstract static class AbstractGenericHandle implements GenericHandle<String> {
+    }
+
+    // GenericHandle is reached through the superclass, which is scanned before the declared StringHandle.
+    static class SuperInterfaceViaSuperclass extends AbstractGenericHandle implements StringHandle {
+        final List<String> events = new ArrayList<>();
+
+        @Override
+        public List<String> events() {
+            return events;
+        }
+    }
+
+    static Stream<StringHandle> overriddenSuperInterfaceSubscribers() {
+        return Stream.of(new SuperInterfaceDeclaredFirst(), new SubInterfaceDeclaredFirst(), new SuperInterfaceViaSuperclass());
+    }
+
+    @ParameterizedTest
+    @MethodSource("overriddenSuperInterfaceSubscribers")
+    void register_whenSuperInterfaceIsScannedBeforeOverridingSubInterface_registersHandlerOnce(final StringHandle subscriber) {
+        EventBus bus = EventBus.create();
+        bus.register(subscriber);
+        bus.post("event");
+
+        assertEquals(List.of("event"), subscriber.events());
+        assertEquals(List.of(subscriber), bus.subscribers(String.class));
+    }
+
+    interface IdStringHandle extends GenericHandle<String> {
+        List<String> events();
+
+        @Subscribe(eventId = "strings")
+        @Override
+        default void handle(final String event) {
+            events().add(event);
+        }
+    }
+
+    static class IdOverrideAfterSuperInterface implements GenericHandle<String>, IdStringHandle {
+        final List<String> events = new ArrayList<>();
+
+        @Override
+        public List<String> events() {
+            return events;
+        }
+    }
+
+    @Test
+    void register_whenOverridingSubInterfaceChangesEventId_usesOnlyTheMostSpecificDeclaration() {
+        EventBus bus = EventBus.create();
+        IdOverrideAfterSuperInterface subscriber = new IdOverrideAfterSuperInterface();
+        bus.register(subscriber);
+        bus.post("unscoped");
+        bus.post("strings", "scoped");
+
+        assertEquals(List.of("scoped"), subscriber.events());
+    }
 }

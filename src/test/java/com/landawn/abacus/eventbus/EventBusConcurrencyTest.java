@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -434,5 +435,66 @@ public class EventBusConcurrencyTest extends TestBase {
             Thread.currentThread().interrupt();
             throw new AssertionError(e);
         }
+    }
+
+    @Test
+    void register_whenSameInstanceIsReRegisteredUnderSameEventId_neverHidesItFromConcurrentPosts() throws Exception {
+        EventBus bus = EventBus.create();
+        AtomicInteger received = new AtomicInteger();
+        Object subscriber = new Object() {
+            @Subscribe
+            public void on(final String event) {
+                received.incrementAndGet();
+            }
+        };
+        bus.register(subscriber, "id");
+
+        AtomicBoolean stop = new AtomicBoolean();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread registrar = new Thread(() -> {
+            try {
+                while (!stop.get()) {
+                    bus.register(subscriber, "id");
+                }
+            } catch (final Throwable e) {
+                failure.set(e);
+            }
+        });
+        registrar.start();
+
+        int posts = 0;
+
+        try {
+            final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(300);
+
+            while (System.nanoTime() < deadline) {
+                bus.post("id", "event");
+                posts++;
+            }
+        } finally {
+            stop.set(true);
+            registrar.join();
+        }
+
+        assertNull(failure.get());
+        assertEquals(posts, received.get());
+    }
+
+    @Test
+    void topLevelThreadGroup_whenCalledFromVirtualThread_skipsVirtualThreadGroup() throws Exception {
+        Method topLevelThreadGroup = EventBus.class.getDeclaredMethod("topLevelThreadGroup");
+        topLevelThreadGroup.setAccessible(true);
+        Object fromPlatformThread = topLevelThreadGroup.invoke(null);
+        AtomicReference<Object> fromVirtualThread = new AtomicReference<>();
+
+        Thread.ofVirtual().start(() -> {
+            try {
+                fromVirtualThread.set(topLevelThreadGroup.invoke(null));
+            } catch (final ReflectiveOperationException e) {
+                fromVirtualThread.set(e);
+            }
+        }).join();
+
+        assertEquals(fromPlatformThread, fromVirtualThread.get());
     }
 }

@@ -77,8 +77,9 @@ package com.landawn.abacus.eventbus;
 public interface Subscriber<E> {
 
     /**
-     * Called when an event of type {@code E} is posted to the {@link EventBus}.
-     * This method is invoked by the {@code EventBus} when a matching event is posted.
+     * Called when a matching event is posted to the {@link EventBus}; see the class description for how
+     * {@code E} is matched (a lambda typed as {@code Subscriber<E>} itself receives every event posted with its
+     * event ID, whatever its type).
      *
      * <p>The method will be called on the thread determined by the
      * {@link com.landawn.abacus.util.ThreadMode} supplied during registration. Without a registration
