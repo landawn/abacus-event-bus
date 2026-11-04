@@ -36,7 +36,7 @@ A lightweight, thread-safe Java event bus for communication between loosely coup
     <dependency>
         <groupId>com.landawn.abacus</groupId>
         <artifactId>abacus-event-bus</artifactId>
-        <version>1.1</version>
+        <version>1.1.1</version>
     </dependency>
 </dependencies>
 ```
@@ -49,7 +49,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.landawn.abacus:abacus-event-bus:1.1'
+    implementation 'com.landawn.abacus:abacus-event-bus:1.1.1'
 }
 ```
 
